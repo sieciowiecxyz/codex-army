@@ -1,60 +1,97 @@
-<p align="center"><code>npm i -g @openai/codex</code><br />or <code>brew install --cask codex</code></p>
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# Codex Army
 
----
+Codex Army is a lightweight fork of OpenAI Codex focused on one practical goal:
+make the agent more persistent and more useful for long implementation tasks.
 
-## Quickstart
+This fork intentionally keeps a small diff against upstream so it is still
+reasonable to merge newer upstream versions from time to time.
 
-### Installing and running Codex CLI
+## What is different from upstream
 
-Install globally with your preferred package manager:
+Codex Army currently adds two fork-specific features:
 
-```shell
-# Install using npm
-npm install -g @openai/codex
+### 1. Automatic account failover with `codex-accounts`
+
+Codex Army integrates with
+[`codex-accounts`](https://github.com/sieciowiecxyz/codex-accounts)
+to automatically switch ChatGPT accounts when the current account hits a usage
+limit or rate limit.
+
+Why this exists:
+
+- upstream Codex stops working when the active account runs out of usable quota
+- many people already rotate between multiple ChatGPT accounts
+- switching accounts manually breaks flow and wastes time
+
+What Codex Army does:
+
+- detects usage-limit / rate-limit failures
+- calls `codex-accounts` to switch to another available account
+- reloads auth
+- retries the same turn so the session can continue instead of stopping
+
+### 2. `/autoprompt` mode
+
+Codex Army adds an `/autoprompt` mode that keeps nudging the model until it
+either:
+
+- finishes the task
+- reports that it is blocked
+- or fails the required JSON status format too many times
+
+Why this exists:
+
+- upstream agents often stop too early
+- the model may produce a partial implementation and act as if the work is done
+- for long coding tasks you often want a stronger "keep going until it is really
+  done" loop
+
+What `/autoprompt` does:
+
+- you give the agent a completion-check prompt
+- after each turn the model must return a small JSON status
+- if the model says it should continue, Codex Army automatically prompts it to
+  continue working
+- the loop stops only when the model returns `done`, `blocked`, or repeatedly
+  fails the JSON contract
+
+This is meant to reduce the common problem where the agent leaves work half-done
+and exits too early.
+
+## Install
+
+Build and install the forked CLI binary as `codex-army`:
+
+```bash
+cd codex-rs
+cargo install --path cli --bin codex-army --force --locked
 ```
 
-```shell
-# Install using Homebrew
-brew install --cask codex
+Then run:
+
+```bash
+codex-army
 ```
 
-Then simply run `codex` to get started.
+## Relationship to upstream
 
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+This project is still based on OpenAI Codex:
 
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
+- upstream repo: <https://github.com/openai/codex>
+- upstream docs: <https://developers.openai.com/codex>
 
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
+The fork tries to stay conservative:
 
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
+- no broad repo-wide rebrand
+- minimal CLI branding for `codex-army`
+- fork logic kept mostly in TUI slash-command flow and auth retry flow
 
-</details>
+That does not guarantee conflict-free merges, but it is designed to make future
+upstream updates easier than a large invasive fork.
 
-### Using Codex with your ChatGPT plan
+## Extra notes
 
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
-
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
-
-## Docs
-
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
-
-This repository is licensed under the [Apache-2.0 License](LICENSE).
+- companion project for account switching:
+  [`codex-accounts`](https://github.com/sieciowiecxyz/codex-accounts)
+- Rust workspace notes:
+  [`codex-rs/README.md`](./codex-rs/README.md)

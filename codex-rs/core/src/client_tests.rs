@@ -7,15 +7,21 @@ use super::X_CODEX_PARENT_THREAD_ID_HEADER;
 use super::X_CODEX_TURN_METADATA_HEADER;
 use super::X_CODEX_WINDOW_ID_HEADER;
 use super::X_OPENAI_SUBAGENT_HEADER;
+use super::should_attempt_rate_limit_account_switch;
 use codex_api::CoreAuthProvider;
 use codex_app_server_protocol::AuthMode;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
+use codex_protocol::error::CodexErr;
+use codex_protocol::error::RetryLimitReachedError;
+use codex_protocol::error::UnexpectedResponseError;
+use codex_protocol::error::UsageLimitReachedError;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use http::StatusCode;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
@@ -168,4 +174,49 @@ fn auth_request_telemetry_context_tracks_attached_auth_and_retry_phase() {
     assert!(auth_context.retry_after_unauthorized);
     assert_eq!(auth_context.recovery_mode, Some("managed"));
     assert_eq!(auth_context.recovery_phase, Some("refresh_token"));
+}
+
+#[test]
+fn should_attempt_rate_limit_account_switch_for_retry_limit() {
+    assert!(should_attempt_rate_limit_account_switch(
+        &CodexErr::RetryLimit(RetryLimitReachedError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            request_id: None,
+        },)
+    ));
+}
+
+#[test]
+fn should_attempt_rate_limit_account_switch_for_usage_limit_reached() {
+    assert!(should_attempt_rate_limit_account_switch(
+        &CodexErr::UsageLimitReached(UsageLimitReachedError {
+            plan_type: None,
+            resets_at: None,
+            rate_limits: None,
+            promo_message: None,
+        }),
+    ));
+}
+
+#[test]
+fn should_attempt_rate_limit_account_switch_for_rate_limit_stream_message() {
+    assert!(should_attempt_rate_limit_account_switch(&CodexErr::Stream(
+        "Rate limit reached for gpt-test".to_string(),
+        None,
+    )));
+}
+
+#[test]
+fn should_not_attempt_rate_limit_account_switch_for_non_rate_limit_error() {
+    assert!(!should_attempt_rate_limit_account_switch(
+        &CodexErr::UnexpectedStatus(UnexpectedResponseError {
+            status: StatusCode::BAD_REQUEST,
+            body: "bad request".to_string(),
+            url: None,
+            cf_ray: None,
+            request_id: None,
+            identity_authorization_error: None,
+            identity_error_code: None,
+        }),
+    ));
 }

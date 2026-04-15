@@ -59,6 +59,7 @@ use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::Renderable;
 use crate::resume_picker::SessionSelection;
 use crate::resume_picker::SessionTarget;
+use crate::status::StatusAccountDisplay;
 #[cfg(test)]
 use crate::test_support::PathBufExt;
 #[cfg(test)]
@@ -78,6 +79,7 @@ use codex_app_server_protocol::ConfigLayerSource;
 use codex_app_server_protocol::FeedbackUploadParams;
 use codex_app_server_protocol::FeedbackUploadResponse;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
+use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::ListMcpServerStatusParams;
 use codex_app_server_protocol::ListMcpServerStatusResponse;
 use codex_app_server_protocol::McpServerStatus;
@@ -1935,10 +1937,19 @@ impl App {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
+            let account = fetch_current_account(request_handle.clone()).await.ok();
+            let (status_account_display, plan_type, has_chatgpt_account) =
+                status_account_state_from_response(account.as_ref());
             let result = fetch_account_rate_limits(request_handle)
                 .await
                 .map_err(|err| err.to_string());
-            app_event_tx.send(AppEvent::RateLimitsLoaded { origin, result });
+            app_event_tx.send(AppEvent::RateLimitsLoaded {
+                origin,
+                result,
+                status_account_display,
+                plan_type,
+                has_chatgpt_account,
+            });
         });
     }
 
@@ -4577,8 +4588,19 @@ impl App {
             AppEvent::RefreshRateLimits { origin } => {
                 self.refresh_rate_limits(app_server, origin);
             }
-            AppEvent::RateLimitsLoaded { origin, result } => match result {
+            AppEvent::RateLimitsLoaded {
+                origin,
+                result,
+                status_account_display,
+                plan_type,
+                has_chatgpt_account,
+            } => match result {
                 Ok(snapshots) => {
+                    self.chat_widget.update_account_state(
+                        status_account_display,
+                        plan_type,
+                        has_chatgpt_account,
+                    );
                     for snapshot in snapshots {
                         self.chat_widget.on_rate_limit_snapshot(Some(snapshot));
                     }
@@ -6227,6 +6249,44 @@ async fn fetch_account_rate_limits(
         .wrap_err("account/rateLimits/read failed in TUI")?;
 
     Ok(app_server_rate_limit_snapshots_to_core(response))
+}
+
+async fn fetch_current_account(
+    request_handle: AppServerRequestHandle,
+) -> Result<GetAccountResponse> {
+    let request_id = RequestId::String(format!("account-read-{}", Uuid::new_v4()));
+    request_handle
+        .request_typed(ClientRequest::GetAccount {
+            request_id,
+            params: codex_app_server_protocol::GetAccountParams {
+                refresh_token: false,
+            },
+        })
+        .await
+        .wrap_err("account/read failed in TUI")
+}
+
+fn status_account_state_from_response(
+    response: Option<&GetAccountResponse>,
+) -> (
+    Option<StatusAccountDisplay>,
+    Option<codex_protocol::account::PlanType>,
+    bool,
+) {
+    match response.and_then(|response| response.account.as_ref()) {
+        Some(codex_app_server_protocol::Account::ApiKey {}) => {
+            (Some(StatusAccountDisplay::ApiKey), None, false)
+        }
+        Some(codex_app_server_protocol::Account::Chatgpt { email, plan_type }) => (
+            Some(StatusAccountDisplay::ChatGpt {
+                email: Some(email.clone()),
+                plan: Some(crate::status::plan_type_display_name(*plan_type)),
+            }),
+            Some(*plan_type),
+            true,
+        ),
+        None => (None, None, false),
+    }
 }
 
 async fn fetch_plugins_list(

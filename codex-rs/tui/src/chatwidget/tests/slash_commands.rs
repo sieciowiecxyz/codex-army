@@ -147,6 +147,63 @@ async fn usage_error_slash_command_is_available_from_local_recall() {
 }
 
 #[tokio::test]
+async fn autoprompt_slash_command_stores_prompt_and_toggles() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    submit_composer_text(
+        &mut chat,
+        "/autoprompt Did you finish feature X? Return only JSON with status.",
+    );
+
+    assert!(chat.autoprompt.enabled);
+    assert_eq!(
+        chat.autoprompt.checker_prompt.as_deref(),
+        Some("Did you finish feature X? Return only JSON with status.")
+    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|cell| lines_to_single_string(&cell))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("Autoprompt on."));
+
+    submit_composer_text(&mut chat, "/autoprompt");
+
+    assert!(!chat.autoprompt.enabled);
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|cell| lines_to_single_string(&cell))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("Autoprompt off."));
+    assert_eq!(recall_latest_after_clearing(&mut chat), "/autoprompt");
+}
+
+#[tokio::test]
+async fn autoprompt_turn_complete_continue_queues_follow_up() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_autoprompt_prompt("Did you finish feature X?".to_string());
+
+    chat.handle_codex_event(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::TurnComplete(turn_complete_event(
+            "turn-1",
+            Some(r#"{"status":"continue","reason":"still working"}"#),
+        )),
+    });
+
+    assert!(chat.autoprompt.enabled);
+    assert_eq!(chat.autoprompt.invalid_json_streak, 0);
+    assert_eq!(chat.queued_user_messages.len(), 1);
+    assert!(
+        chat.queued_user_messages[0]
+            .text
+            .contains("Did you finish feature X?"),
+    );
+}
+
+#[tokio::test]
 async fn unrecognized_slash_command_is_not_added_to_local_recall() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

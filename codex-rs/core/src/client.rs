@@ -87,6 +87,7 @@ use http::header::AUTHORIZATION;
 use reqwest::StatusCode;
 use std::time::Duration;
 use std::time::Instant;
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
@@ -345,6 +346,41 @@ impl ModelClient {
 
     pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.state.auth_manager.clone()
+    }
+
+    pub(crate) async fn try_switch_account_after_rate_limit(&self) -> bool {
+        let Some(auth_manager) = self.auth_manager() else {
+            return false;
+        };
+        let output = match Command::new("codex-accounts")
+            .arg("use-best")
+            .output()
+            .await
+        {
+            Ok(output) => output,
+            Err(err) => {
+                warn!("failed to run `codex-accounts use-best`: {err}");
+                return false;
+            }
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if stderr.is_empty() {
+                warn!(
+                    "`codex-accounts use-best` failed with status {}",
+                    output.status
+                );
+            } else {
+                warn!("`codex-accounts use-best` failed: {stderr}");
+            }
+            return false;
+        }
+        let reloaded = auth_manager.reload();
+        if !reloaded {
+            warn!("auth reload reported no change after `codex-accounts use-best`");
+        }
+        self.store_cached_websocket_session(WebsocketSession::default());
+        true
     }
 
     pub(crate) fn set_window_generation(&self, window_generation: u64) {
@@ -814,6 +850,11 @@ impl ModelClientSession {
         self.websocket_session.last_response_rx = None;
         self.websocket_session
             .set_connection_reused(/*connection_reused*/ false);
+    }
+
+    pub(crate) fn reset_auth_dependent_session_state(&mut self) {
+        self.reset_websocket_session();
+        self.turn_state = Arc::new(OnceLock::new());
     }
 
     fn build_responses_request(
@@ -1836,6 +1877,16 @@ fn api_error_http_status(error: &ApiError) -> Option<u16> {
     match error {
         ApiError::Transport(TransportError::Http { status, .. }) => Some(status.as_u16()),
         _ => None,
+    }
+}
+
+pub(crate) fn should_attempt_rate_limit_account_switch(error: &CodexErr) -> bool {
+    match error {
+        CodexErr::UsageLimitReached(_) => true,
+        CodexErr::RetryLimit(_) => true,
+        CodexErr::UnexpectedStatus(err) => err.status == StatusCode::TOO_MANY_REQUESTS,
+        CodexErr::Stream(message, _) => message.to_ascii_lowercase().contains("rate limit"),
+        _ => false,
     }
 }
 

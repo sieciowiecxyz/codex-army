@@ -203,6 +203,7 @@ pub(super) async fn make_chatwidget_manual(
         rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
         adaptive_chunking: crate::streaming::chunking::AdaptiveChunkingPolicy::default(),
         stream_controller: None,
+        autoprompt: AutopromptState::default(),
         plan_stream_controller: None,
         clipboard_lease: None,
         pending_guardian_review_status: PendingGuardianReviewStatus::default(),

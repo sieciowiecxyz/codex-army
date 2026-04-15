@@ -303,11 +303,11 @@ use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
-use crate::bottom_pane::CollaborationModeIndicator;
 use crate::bottom_pane::ColumnWidthMode;
 use crate::bottom_pane::DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED;
 use crate::bottom_pane::ExperimentalFeatureItem;
 use crate::bottom_pane::ExperimentalFeaturesView;
+use crate::bottom_pane::FooterIndicator;
 use crate::bottom_pane::InputResult;
 use crate::bottom_pane::LocalImageAttachment;
 use crate::bottom_pane::McpServerElicitationFormRequest;
@@ -873,6 +873,8 @@ pub(crate) struct ChatWidget {
     suppress_initial_user_message_submit: bool,
     // User messages queued while a turn is in progress
     queued_user_messages: VecDeque<UserMessage>,
+    // Thread-local state for the `/autoprompt` completion-check loop.
+    autoprompt: AutopromptState,
     // User messages that tried to steer a non-regular turn and must be retried first.
     rejected_steers_queue: VecDeque<UserMessage>,
     // Steers already submitted to core but not yet committed into history.
@@ -1052,6 +1054,20 @@ impl ThreadComposerState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct AutopromptState {
+    enabled: bool,
+    checker_prompt: Option<String>,
+    invalid_json_streak: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutopromptStatus {
+    Done,
+    Continue,
+    Blocked,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ThreadInputState {
     composer: Option<ThreadComposerState>,
@@ -1060,6 +1076,7 @@ pub(crate) struct ThreadInputState {
     queued_user_messages: VecDeque<UserMessage>,
     current_collaboration_mode: CollaborationMode,
     active_collaboration_mask: Option<CollaborationModeMask>,
+    autoprompt: AutopromptState,
     task_running: bool,
     agent_turn_running: bool,
 }
@@ -2407,6 +2424,12 @@ impl ChatWidget {
 
         let had_pending_steers = !self.pending_steers.is_empty();
         self.refresh_pending_input_preview();
+        if !from_replay {
+            self.maybe_enqueue_autoprompt_follow_up(
+                notification_response.as_str(),
+                had_pending_steers,
+            );
+        }
 
         if !from_replay && !self.has_queued_follow_up_messages() && !had_pending_steers {
             self.maybe_prompt_plan_implementation();
@@ -2504,6 +2527,109 @@ impl ChatWidget {
 
     fn has_queued_follow_up_messages(&self) -> bool {
         !self.rejected_steers_queue.is_empty() || !self.queued_user_messages.is_empty()
+    }
+
+    fn maybe_enqueue_autoprompt_follow_up(
+        &mut self,
+        notification_response: &str,
+        had_pending_steers: bool,
+    ) {
+        if !self.autoprompt.enabled || had_pending_steers || self.has_queued_follow_up_messages() {
+            return;
+        }
+        let Some(checker_prompt) = self.autoprompt.checker_prompt.clone() else {
+            self.disable_autoprompt();
+            return;
+        };
+        let response = self
+            .last_agent_markdown
+            .as_deref()
+            .filter(|message| !message.is_empty())
+            .or_else(|| (!notification_response.is_empty()).then_some(notification_response))
+            .unwrap_or_default();
+        match Self::parse_autoprompt_status(response) {
+            Some(AutopromptStatus::Done) => {
+                self.autoprompt.invalid_json_streak = 0;
+                self.disable_autoprompt();
+                self.add_info_message("Autoprompt finished: done.".to_string(), /*hint*/ None);
+            }
+            Some(AutopromptStatus::Blocked) => {
+                self.autoprompt.invalid_json_streak = 0;
+                self.disable_autoprompt();
+                self.add_info_message(
+                    "Autoprompt finished: blocked.".to_string(),
+                    /*hint*/ None,
+                );
+            }
+            Some(AutopromptStatus::Continue) => {
+                self.autoprompt.invalid_json_streak = 0;
+                self.queued_user_messages.push_front(UserMessage {
+                    text: Self::autoprompt_continue_prompt(&checker_prompt),
+                    local_images: Vec::new(),
+                    remote_image_urls: Vec::new(),
+                    text_elements: Vec::new(),
+                    mention_bindings: Vec::new(),
+                });
+                self.refresh_pending_input_preview();
+            }
+            None => {
+                self.autoprompt.invalid_json_streak += 1;
+                if self.autoprompt.invalid_json_streak >= 3 {
+                    self.disable_autoprompt();
+                    self.add_error_message(
+                        "Autoprompt stopped after 3 invalid JSON responses.".to_string(),
+                    );
+                    return;
+                }
+                self.queued_user_messages.push_front(UserMessage {
+                    text: Self::autoprompt_repair_prompt(&checker_prompt),
+                    local_images: Vec::new(),
+                    remote_image_urls: Vec::new(),
+                    text_elements: Vec::new(),
+                    mention_bindings: Vec::new(),
+                });
+                self.refresh_pending_input_preview();
+            }
+        }
+    }
+
+    fn parse_autoprompt_status(response: &str) -> Option<AutopromptStatus> {
+        let trimmed = response.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let candidate = if trimmed.starts_with("```") {
+            let without_open = trimmed
+                .strip_prefix("```json")
+                .or_else(|| trimmed.strip_prefix("```"))?;
+            let (body, trailing) = without_open.rsplit_once("```")?;
+            if !trailing.trim().is_empty() {
+                return None;
+            }
+            body.trim()
+        } else {
+            trimmed
+        };
+        let value: serde_json::Value = serde_json::from_str(candidate).ok()?;
+        let status = value.get("status")?.as_str()?;
+        match status {
+            "done" => Some(AutopromptStatus::Done),
+            "continue" => Some(AutopromptStatus::Continue),
+            "blocked" => Some(AutopromptStatus::Blocked),
+            _ => None,
+        }
+    }
+
+    fn autoprompt_continue_prompt(checker_prompt: &str) -> String {
+        format!(
+            "Autoprompt is active.\n\nEvaluate your progress against this instruction:\n{checker_prompt}\n\nContinue working on the task. When you stop, return only a JSON object with this schema:\n{{\"status\":\"done|continue|blocked\",\"reason\":\"...\"}}"
+        )
+    }
+
+    fn autoprompt_repair_prompt(checker_prompt: &str) -> String {
+        format!(
+            "Autoprompt is active.\n\nYour previous message did not match the required format.\nEvaluate your progress against this instruction:\n{checker_prompt}\n\nReturn only a JSON object with this schema:\n{{\"status\":\"done|continue|blocked\",\"reason\":\"...\"}}\nIf the task is not complete and you are not blocked, continue working and finish with that JSON."
+        )
     }
 
     fn pop_next_queued_user_message(&mut self) -> Option<UserMessage> {
@@ -3185,6 +3311,7 @@ impl ChatWidget {
             queued_user_messages: self.queued_user_messages.clone(),
             current_collaboration_mode: self.current_collaboration_mode.clone(),
             active_collaboration_mask: self.active_collaboration_mask.clone(),
+            autoprompt: self.autoprompt.clone(),
             task_running: self.bottom_pane.is_task_running(),
             agent_turn_running: self.agent_turn_running,
         })
@@ -3195,8 +3322,9 @@ impl ChatWidget {
         if let Some(input_state) = input_state {
             self.current_collaboration_mode = input_state.current_collaboration_mode;
             self.active_collaboration_mask = input_state.active_collaboration_mask;
+            self.autoprompt = input_state.autoprompt;
             self.agent_turn_running = input_state.agent_turn_running;
-            self.update_collaboration_mode_indicator();
+            self.update_footer_indicators();
             self.refresh_model_dependent_surfaces();
             if let Some(composer) = input_state.composer {
                 let local_image_paths = composer
@@ -3238,6 +3366,7 @@ impl ChatWidget {
             self.rejected_steers_queue = input_state.rejected_steers_queue;
             self.queued_user_messages = input_state.queued_user_messages;
         } else {
+            self.autoprompt = AutopromptState::default();
             self.agent_turn_running = false;
             self.pending_steers.clear();
             self.rejected_steers_queue.clear();
@@ -4861,6 +4990,7 @@ impl ChatWidget {
             pending_notification: None,
             quit_shortcut_expires_at: None,
             quit_shortcut_key: None,
+            autoprompt: AutopromptState::default(),
             is_review_mode: false,
             pre_review_token_info: None,
             needs_final_message_separator: false,
@@ -4920,7 +5050,7 @@ impl ChatWidget {
                     WindowsSandboxLevel::RestrictedToken
                 ),
         );
-        widget.update_collaboration_mode_indicator();
+        widget.update_footer_indicators();
 
         widget
             .bottom_pane
@@ -9527,19 +9657,46 @@ impl ChatWidget {
             .then_some(active_mode.display_name())
     }
 
-    fn collaboration_mode_indicator(&self) -> Option<CollaborationModeIndicator> {
-        if !self.collaboration_modes_enabled() {
-            return None;
+    fn footer_indicators(&self) -> Vec<FooterIndicator> {
+        let mut indicators = Vec::new();
+        if self.collaboration_modes_enabled() && matches!(self.active_mode_kind(), ModeKind::Plan) {
+            indicators.push(FooterIndicator::Plan);
         }
-        match self.active_mode_kind() {
-            ModeKind::Plan => Some(CollaborationModeIndicator::Plan),
-            ModeKind::Default | ModeKind::PairProgramming | ModeKind::Execute => None,
+        if self.autoprompt.enabled {
+            indicators.push(FooterIndicator::Autoprompt);
         }
+        indicators
     }
 
-    fn update_collaboration_mode_indicator(&mut self) {
-        let indicator = self.collaboration_mode_indicator();
-        self.bottom_pane.set_collaboration_mode_indicator(indicator);
+    fn update_footer_indicators(&mut self) {
+        self.bottom_pane
+            .set_footer_indicators(self.footer_indicators());
+    }
+
+    fn set_autoprompt_prompt(&mut self, prompt: String) {
+        self.autoprompt.checker_prompt = Some(prompt);
+        self.autoprompt.enabled = true;
+        self.autoprompt.invalid_json_streak = 0;
+        self.update_footer_indicators();
+        self.add_info_message("Autoprompt on.".to_string(), /*hint*/ None);
+    }
+
+    fn toggle_autoprompt(&mut self) {
+        if self.autoprompt.checker_prompt.is_none() {
+            self.add_error_message("Usage: /autoprompt <completion-check prompt>".to_string());
+            return;
+        }
+        self.autoprompt.enabled = !self.autoprompt.enabled;
+        self.autoprompt.invalid_json_streak = 0;
+        self.update_footer_indicators();
+        let status = if self.autoprompt.enabled { "on" } else { "off" };
+        self.add_info_message(format!("Autoprompt {status}."), /*hint*/ None);
+    }
+
+    fn disable_autoprompt(&mut self) {
+        self.autoprompt.enabled = false;
+        self.autoprompt.invalid_json_streak = 0;
+        self.update_footer_indicators();
     }
 
     fn personality_label(personality: Personality) -> &'static str {
@@ -9589,7 +9746,7 @@ impl ChatWidget {
             mask.reasoning_effort = Some(Some(effort));
         }
         self.active_collaboration_mask = Some(mask);
-        self.update_collaboration_mode_indicator();
+        self.update_footer_indicators();
         self.refresh_model_dependent_surfaces();
         let next_mode = self.active_mode_kind();
         let next_model = self.current_model();

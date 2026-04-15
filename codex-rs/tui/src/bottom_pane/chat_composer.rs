@@ -153,7 +153,7 @@ use super::command_popup::CommandItem;
 use super::command_popup::CommandPopup;
 use super::command_popup::CommandPopupFlags;
 use super::file_search_popup::FileSearchPopup;
-use super::footer::CollaborationModeIndicator;
+use super::footer::FooterIndicator;
 use super::footer::FooterMode;
 use super::footer::FooterProps;
 use super::footer::SummaryLeft;
@@ -352,7 +352,7 @@ pub(crate) struct ChatComposer {
     recent_submission_mention_bindings: Vec<MentionBinding>,
     collaboration_modes_enabled: bool,
     config: ChatComposerConfig,
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    footer_indicators: Vec<FooterIndicator>,
     connectors_enabled: bool,
     plugins_command_enabled: bool,
     fast_command_enabled: bool,
@@ -487,7 +487,7 @@ impl ChatComposer {
             recent_submission_mention_bindings: Vec::new(),
             collaboration_modes_enabled: false,
             config,
-            collaboration_mode_indicator: None,
+            footer_indicators: Vec::new(),
             connectors_enabled: false,
             plugins_command_enabled: false,
             fast_command_enabled: false,
@@ -576,11 +576,8 @@ impl ChatComposer {
         self.fast_command_enabled = enabled;
     }
 
-    pub fn set_collaboration_mode_indicator(
-        &mut self,
-        indicator: Option<CollaborationModeIndicator>,
-    ) {
-        self.collaboration_mode_indicator = indicator;
+    pub fn set_footer_indicators(&mut self, indicators: Vec<FooterIndicator>) {
+        self.footer_indicators = indicators;
     }
 
     pub fn set_personality_command_enabled(&mut self, enabled: bool) {
@@ -3657,7 +3654,7 @@ impl ChatComposer {
             ActivePopup::None => {
                 let footer_props = self.footer_props();
                 let show_cycle_hint =
-                    !footer_props.is_task_running && self.collaboration_mode_indicator.is_some();
+                    !footer_props.is_task_running && !self.footer_indicators.is_empty();
                 let show_shortcuts_hint = match footer_props.mode {
                     FooterMode::ComposerEmpty => !self.is_in_paste_burst(),
                     FooterMode::ComposerHasDraft => false,
@@ -3707,10 +3704,10 @@ impl ChatComposer {
                     } else {
                         None
                     };
-                    let left_mode_indicator = if status_line_active {
-                        None
+                    let left_footer_indicators = if status_line_active {
+                        &[][..]
                     } else {
-                        self.collaboration_mode_indicator
+                        &self.footer_indicators
                     };
                     let mut left_width = if self.footer_flash_visible() {
                         self.footer_flash
@@ -3727,17 +3724,16 @@ impl ChatComposer {
                     } else {
                         footer_line_width(
                             &footer_props,
-                            left_mode_indicator,
+                            left_footer_indicators,
                             show_cycle_hint,
                             show_shortcuts_hint,
                             show_queue_hint,
                         )
                     };
                     let right_line = if status_line_active {
-                        let full =
-                            mode_indicator_line(self.collaboration_mode_indicator, show_cycle_hint);
+                        let full = mode_indicator_line(&self.footer_indicators, show_cycle_hint);
                         let compact = mode_indicator_line(
-                            self.collaboration_mode_indicator,
+                            &self.footer_indicators,
                             /*show_cycle_hint*/ false,
                         );
                         let full_width = full.as_ref().map(|l| l.width() as u16).unwrap_or(0);
@@ -3779,7 +3775,7 @@ impl ChatComposer {
                                 Some(single_line_footer_layout(
                                     hint_rect,
                                     right_width,
-                                    left_mode_indicator,
+                                    left_footer_indicators,
                                     show_cycle_hint,
                                     show_shortcuts_hint,
                                     show_queue_hint,
@@ -3817,7 +3813,7 @@ impl ChatComposer {
                                             hint_rect,
                                             buf,
                                             &footer_props,
-                                            left_mode_indicator,
+                                            left_footer_indicators,
                                             show_cycle_hint,
                                             show_shortcuts_hint,
                                             show_queue_hint,
@@ -3828,7 +3824,7 @@ impl ChatComposer {
                                         hint_rect,
                                         buf,
                                         &footer_props,
-                                        left_mode_indicator,
+                                        left_footer_indicators,
                                         show_cycle_hint,
                                         show_shortcuts_hint,
                                         show_queue_hint,
@@ -3855,7 +3851,7 @@ impl ChatComposer {
                             hint_rect,
                             buf,
                             &footer_props,
-                            self.collaboration_mode_indicator,
+                            &self.footer_indicators,
                             show_cycle_hint,
                             show_shortcuts_hint,
                             show_queue_hint,
@@ -4360,10 +4356,10 @@ mod tests {
         fn setup_collab_footer(
             composer: &mut ChatComposer,
             context_percent: i64,
-            indicator: Option<CollaborationModeIndicator>,
+            indicators: Vec<FooterIndicator>,
         ) {
             composer.set_collaboration_modes_enabled(/*enabled*/ true);
-            composer.set_collaboration_mode_indicator(indicator);
+            composer.set_footer_indicators(indicators);
             composer.set_context_window(Some(context_percent), /*used_tokens*/ None);
         }
 
@@ -4374,7 +4370,9 @@ mod tests {
             /*enhanced_keys_supported*/ true,
             |composer| {
                 setup_collab_footer(
-                    composer, /*context_percent*/ 100, /*indicator*/ None,
+                    composer,
+                    /*context_percent*/ 100,
+                    /*indicators*/ Vec::new(),
                 );
             },
         );
@@ -4384,7 +4382,9 @@ mod tests {
             /*enhanced_keys_supported*/ true,
             |composer| {
                 setup_collab_footer(
-                    composer, /*context_percent*/ 100, /*indicator*/ None,
+                    composer,
+                    /*context_percent*/ 100,
+                    /*indicators*/ Vec::new(),
                 );
             },
         );
@@ -4394,7 +4394,9 @@ mod tests {
             /*enhanced_keys_supported*/ true,
             |composer| {
                 setup_collab_footer(
-                    composer, /*context_percent*/ 100, /*indicator*/ None,
+                    composer,
+                    /*context_percent*/ 100,
+                    /*indicators*/ Vec::new(),
                 );
             },
         );
@@ -4404,7 +4406,9 @@ mod tests {
             /*enhanced_keys_supported*/ true,
             |composer| {
                 setup_collab_footer(
-                    composer, /*context_percent*/ 100, /*indicator*/ None,
+                    composer,
+                    /*context_percent*/ 100,
+                    /*indicators*/ Vec::new(),
                 );
             },
         );
@@ -4418,7 +4422,7 @@ mod tests {
                 setup_collab_footer(
                     composer,
                     /*context_percent*/ 100,
-                    Some(CollaborationModeIndicator::Plan),
+                    vec![FooterIndicator::Plan],
                 );
             },
         );
@@ -4430,7 +4434,7 @@ mod tests {
                 setup_collab_footer(
                     composer,
                     /*context_percent*/ 100,
-                    Some(CollaborationModeIndicator::Plan),
+                    vec![FooterIndicator::Plan],
                 );
             },
         );
@@ -4442,7 +4446,7 @@ mod tests {
                 setup_collab_footer(
                     composer,
                     /*context_percent*/ 100,
-                    Some(CollaborationModeIndicator::Plan),
+                    vec![FooterIndicator::Plan],
                 );
             },
         );
@@ -4454,7 +4458,7 @@ mod tests {
                 setup_collab_footer(
                     composer,
                     /*context_percent*/ 100,
-                    Some(CollaborationModeIndicator::Plan),
+                    vec![FooterIndicator::Plan],
                 );
             },
         );
@@ -4466,7 +4470,9 @@ mod tests {
             /*enhanced_keys_supported*/ true,
             |composer| {
                 setup_collab_footer(
-                    composer, /*context_percent*/ 98, /*indicator*/ None,
+                    composer,
+                    /*context_percent*/ 98,
+                    /*indicators*/ Vec::new(),
                 );
                 composer.set_task_running(/*running*/ true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
@@ -4478,7 +4484,9 @@ mod tests {
             /*enhanced_keys_supported*/ true,
             |composer| {
                 setup_collab_footer(
-                    composer, /*context_percent*/ 98, /*indicator*/ None,
+                    composer,
+                    /*context_percent*/ 98,
+                    /*indicators*/ Vec::new(),
                 );
                 composer.set_task_running(/*running*/ true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
@@ -4490,7 +4498,9 @@ mod tests {
             /*enhanced_keys_supported*/ true,
             |composer| {
                 setup_collab_footer(
-                    composer, /*context_percent*/ 98, /*indicator*/ None,
+                    composer,
+                    /*context_percent*/ 98,
+                    /*indicators*/ Vec::new(),
                 );
                 composer.set_task_running(/*running*/ true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
@@ -4502,7 +4512,9 @@ mod tests {
             /*enhanced_keys_supported*/ true,
             |composer| {
                 setup_collab_footer(
-                    composer, /*context_percent*/ 98, /*indicator*/ None,
+                    composer,
+                    /*context_percent*/ 98,
+                    /*indicators*/ Vec::new(),
                 );
                 composer.set_task_running(/*running*/ true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
@@ -4514,7 +4526,9 @@ mod tests {
             /*enhanced_keys_supported*/ true,
             |composer| {
                 setup_collab_footer(
-                    composer, /*context_percent*/ 98, /*indicator*/ None,
+                    composer,
+                    /*context_percent*/ 98,
+                    /*indicators*/ Vec::new(),
                 );
                 composer.set_task_running(/*running*/ true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
@@ -4530,7 +4544,7 @@ mod tests {
                 setup_collab_footer(
                     composer,
                     /*context_percent*/ 98,
-                    Some(CollaborationModeIndicator::Plan),
+                    vec![FooterIndicator::Plan],
                 );
                 composer.set_task_running(/*running*/ true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
@@ -4544,7 +4558,7 @@ mod tests {
                 setup_collab_footer(
                     composer,
                     /*context_percent*/ 98,
-                    Some(CollaborationModeIndicator::Plan),
+                    vec![FooterIndicator::Plan],
                 );
                 composer.set_task_running(/*running*/ true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
@@ -4558,7 +4572,7 @@ mod tests {
                 setup_collab_footer(
                     composer,
                     /*context_percent*/ 98,
-                    Some(CollaborationModeIndicator::Plan),
+                    vec![FooterIndicator::Plan],
                 );
                 composer.set_task_running(/*running*/ true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
@@ -4572,7 +4586,7 @@ mod tests {
                 setup_collab_footer(
                     composer,
                     /*context_percent*/ 98,
-                    Some(CollaborationModeIndicator::Plan),
+                    vec![FooterIndicator::Plan],
                 );
                 composer.set_task_running(/*running*/ true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
@@ -4586,7 +4600,7 @@ mod tests {
                 setup_collab_footer(
                     composer,
                     /*context_percent*/ 98,
-                    Some(CollaborationModeIndicator::Plan),
+                    vec![FooterIndicator::Plan],
                 );
                 composer.set_task_running(/*running*/ true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());

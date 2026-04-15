@@ -31,6 +31,7 @@ use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::TerminalTitleItem;
 use crate::history_cell::HistoryCell;
 use crate::legacy_core::plugins::PluginCapabilitySummary;
+use crate::status::StatusAccountDisplay;
 
 use codex_config::types::ApprovalsReviewer;
 use codex_features::Feature;
@@ -169,6 +170,9 @@ pub(crate) enum AppEvent {
     RateLimitsLoaded {
         origin: RateLimitRefreshOrigin,
         result: Result<Vec<RateLimitSnapshot>, String>,
+        status_account_display: Option<StatusAccountDisplay>,
+        plan_type: Option<codex_protocol::account::PlanType>,
+        has_chatgpt_account: bool,
     },
 
     /// Result of prefetching connectors.

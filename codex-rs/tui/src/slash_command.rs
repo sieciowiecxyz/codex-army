@@ -36,6 +36,7 @@ pub enum SlashCommand {
     Copy,
     Diff,
     Mention,
+    Autoprompt,
     Status,
     DebugConfig,
     Title,
@@ -84,6 +85,7 @@ impl SlashCommand {
             SlashCommand::Copy => "copy last response as markdown",
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Mention => "mention a file",
+            SlashCommand::Autoprompt => "toggle automatic completion checks for this thread",
             SlashCommand::Skills => "use skills to improve how Codex performs specific tasks",
             SlashCommand::Status => "show current session configuration and token usage",
             SlashCommand::DebugConfig => "show config layers and requirement sources for debugging",
@@ -133,6 +135,7 @@ impl SlashCommand {
                 | SlashCommand::Plan
                 | SlashCommand::Fast
                 | SlashCommand::Resume
+                | SlashCommand::Autoprompt
                 | SlashCommand::SandboxReadRoot
         )
     }
@@ -164,6 +167,7 @@ impl SlashCommand {
             | SlashCommand::Copy
             | SlashCommand::Rename
             | SlashCommand::Mention
+            | SlashCommand::Autoprompt
             | SlashCommand::Skills
             | SlashCommand::Status
             | SlashCommand::DebugConfig

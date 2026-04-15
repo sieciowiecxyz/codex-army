@@ -177,6 +177,7 @@ use uuid::Uuid;
 
 use crate::client::ModelClient;
 use crate::client::ModelClientSession;
+use crate::client::should_attempt_rate_limit_account_switch;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::codex_thread::ThreadConfigSnapshot;
@@ -7011,6 +7012,7 @@ async fn run_sampling_request(
         )
         .await;
     let mut retries = 0;
+    let mut rate_limit_failover_attempted = false;
     let mut initial_input = Some(input);
     loop {
         let prompt_input = if let Some(input) = initial_input.take() {
@@ -7047,6 +7049,26 @@ async fn run_sampling_request(
                 return Err(CodexErr::ContextWindowExceeded);
             }
             Err(CodexErr::UsageLimitReached(e)) => {
+                if !rate_limit_failover_attempted
+                    && sess
+                        .services
+                        .model_client
+                        .try_switch_account_after_rate_limit()
+                        .await
+                {
+                    client_session.reset_auth_dependent_session_state();
+                    sess.send_event(
+                        &turn_context,
+                        EventMsg::Warning(WarningEvent {
+                            message: "Usage limit reached. Switched account and retrying."
+                                .to_string(),
+                        }),
+                    )
+                    .await;
+                    rate_limit_failover_attempted = true;
+                    retries = 0;
+                    continue;
+                }
                 let rate_limits = e.rate_limits.clone();
                 if let Some(rate_limits) = rate_limits {
                     sess.update_rate_limits(&turn_context, *rate_limits).await;
@@ -7055,6 +7077,27 @@ async fn run_sampling_request(
             }
             Err(err) => err,
         };
+
+        if !rate_limit_failover_attempted
+            && should_attempt_rate_limit_account_switch(&err)
+            && sess
+                .services
+                .model_client
+                .try_switch_account_after_rate_limit()
+                .await
+        {
+            client_session.reset_auth_dependent_session_state();
+            sess.send_event(
+                &turn_context,
+                EventMsg::Warning(WarningEvent {
+                    message: "Rate limit reached. Switched account and retrying.".to_string(),
+                }),
+            )
+            .await;
+            rate_limit_failover_attempted = true;
+            retries = 0;
+            continue;
+        }
 
         if !err.is_retryable() {
             return Err(err);

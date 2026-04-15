@@ -87,8 +87,9 @@ pub(crate) struct FooterProps {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CollaborationModeIndicator {
+pub(crate) enum FooterIndicator {
     Plan,
+    Autoprompt,
     #[allow(dead_code)] // Hidden by current mode filtering; kept for future UI re-enablement.
     PairProgramming,
     #[allow(dead_code)] // Hidden by current mode filtering; kept for future UI re-enablement.
@@ -98,7 +99,7 @@ pub(crate) enum CollaborationModeIndicator {
 const MODE_CYCLE_HINT: &str = "shift+tab to cycle";
 const FOOTER_CONTEXT_GAP_COLS: u16 = 1;
 
-impl CollaborationModeIndicator {
+impl FooterIndicator {
     fn label(self, show_cycle_hint: bool) -> String {
         let suffix = if show_cycle_hint {
             format!(" ({MODE_CYCLE_HINT})")
@@ -106,20 +107,22 @@ impl CollaborationModeIndicator {
             String::new()
         };
         match self {
-            CollaborationModeIndicator::Plan => format!("Plan mode{suffix}"),
-            CollaborationModeIndicator::PairProgramming => {
+            FooterIndicator::Plan => format!("Plan mode{suffix}"),
+            FooterIndicator::Autoprompt => "Autoprompt on".to_string(),
+            FooterIndicator::PairProgramming => {
                 format!("Pair Programming mode{suffix}")
             }
-            CollaborationModeIndicator::Execute => format!("Execute mode{suffix}"),
+            FooterIndicator::Execute => format!("Execute mode{suffix}"),
         }
     }
 
     fn styled_span(self, show_cycle_hint: bool) -> Span<'static> {
         let label = self.label(show_cycle_hint);
         match self {
-            CollaborationModeIndicator::Plan => Span::from(label).magenta(),
-            CollaborationModeIndicator::PairProgramming => Span::from(label).cyan(),
-            CollaborationModeIndicator::Execute => Span::from(label).dim(),
+            FooterIndicator::Plan => Span::from(label).magenta(),
+            FooterIndicator::Autoprompt => Span::from(label).green(),
+            FooterIndicator::PairProgramming => Span::from(label).cyan(),
+            FooterIndicator::Execute => Span::from(label).dim(),
         }
     }
 }
@@ -206,7 +209,7 @@ pub(crate) fn footer_height(props: &FooterProps) -> u16 {
     };
     footer_from_props_lines(
         props,
-        /*collaboration_mode_indicator*/ None,
+        &[],
         /*show_cycle_hint*/ false,
         show_shortcuts_hint,
         show_queue_hint,
@@ -235,7 +238,7 @@ pub(crate) fn render_footer_from_props(
     area: Rect,
     buf: &mut Buffer,
     props: &FooterProps,
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    footer_indicators: &[FooterIndicator],
     show_cycle_hint: bool,
     show_shortcuts_hint: bool,
     show_queue_hint: bool,
@@ -243,7 +246,7 @@ pub(crate) fn render_footer_from_props(
     Paragraph::new(prefix_lines(
         footer_from_props_lines(
             props,
-            collaboration_mode_indicator,
+            footer_indicators,
             show_cycle_hint,
             show_shortcuts_hint,
             show_queue_hint,
@@ -273,10 +276,7 @@ struct LeftSideState {
     show_cycle_hint: bool,
 }
 
-fn left_side_line(
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
-    state: LeftSideState,
-) -> Line<'static> {
+fn left_side_line(footer_indicators: &[FooterIndicator], state: LeftSideState) -> Line<'static> {
     let mut line = Line::from("");
     match state.hint {
         SummaryHintKind::None => {}
@@ -294,11 +294,11 @@ fn left_side_line(
         }
     };
 
-    if let Some(collaboration_mode_indicator) = collaboration_mode_indicator {
-        if !matches!(state.hint, SummaryHintKind::None) {
+    for (idx, indicator) in footer_indicators.iter().enumerate() {
+        if !matches!(state.hint, SummaryHintKind::None) || idx > 0 {
             line.push_span(" · ".dim());
         }
-        line.push_span(collaboration_mode_indicator.styled_span(state.show_cycle_hint));
+        line.push_span(indicator.styled_span(state.show_cycle_hint));
     }
 
     line
@@ -315,7 +315,7 @@ pub(crate) enum SummaryLeft {
 pub(crate) fn single_line_footer_layout(
     area: Rect,
     context_width: u16,
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    footer_indicators: &[FooterIndicator],
     show_cycle_hint: bool,
     show_shortcuts_hint: bool,
     show_queue_hint: bool,
@@ -331,7 +331,7 @@ pub(crate) fn single_line_footer_layout(
         hint: hint_kind,
         show_cycle_hint,
     };
-    let default_line = left_side_line(collaboration_mode_indicator, default_state);
+    let default_line = left_side_line(footer_indicators, default_state);
     let default_width = default_line.width() as u16;
     if default_width > 0 && can_show_left_with_context(area, default_width, context_width) {
         return (SummaryLeft::Default, true);
@@ -341,7 +341,7 @@ pub(crate) fn single_line_footer_layout(
         if state == default_state {
             default_line.clone()
         } else {
-            left_side_line(collaboration_mode_indicator, state)
+            left_side_line(footer_indicators, state)
         }
     };
     let state_width = |state: LeftSideState| -> u16 { state_line(state).width() as u16 };
@@ -398,7 +398,7 @@ pub(crate) fn single_line_footer_layout(
                 return (SummaryLeft::Custom(state_line(state)), false);
             }
         }
-    } else if collaboration_mode_indicator.is_some() {
+    } else if !footer_indicators.is_empty() {
         if show_cycle_hint {
             // First fallback: drop shortcut hint but keep the cycle
             // hint on the mode label if it can fit.
@@ -442,33 +442,26 @@ pub(crate) fn single_line_footer_layout(
 
     // Final fallback: if queue variants (or other earlier states) could not fit
     // at all, drop every hint and try to show just the mode label.
-    if let Some(collaboration_mode_indicator) = collaboration_mode_indicator {
+    if !footer_indicators.is_empty() {
         let mode_only_state = LeftSideState {
             hint: SummaryHintKind::None,
             show_cycle_hint: false,
         };
         // Compute the width without going through `state_line` so we do not
         // depend on `default_state` (which may still be a queue variant).
-        let mode_only_width =
-            left_side_line(Some(collaboration_mode_indicator), mode_only_state).width() as u16;
+        let mode_only_width = left_side_line(footer_indicators, mode_only_state).width() as u16;
         if !context_requires_cycle_hint
             && can_show_left_with_context(area, mode_only_width, context_width)
         {
             return (
-                SummaryLeft::Custom(left_side_line(
-                    Some(collaboration_mode_indicator),
-                    mode_only_state,
-                )),
-                true, // show_context
+                SummaryLeft::Custom(left_side_line(footer_indicators, mode_only_state)),
+                true,
             );
         }
         if left_fits(area, mode_only_width) {
             return (
-                SummaryLeft::Custom(left_side_line(
-                    Some(collaboration_mode_indicator),
-                    mode_only_state,
-                )),
-                false, // show_context
+                SummaryLeft::Custom(left_side_line(footer_indicators, mode_only_state)),
+                false,
             );
         }
     }
@@ -477,10 +470,20 @@ pub(crate) fn single_line_footer_layout(
 }
 
 pub(crate) fn mode_indicator_line(
-    indicator: Option<CollaborationModeIndicator>,
+    indicators: &[FooterIndicator],
     show_cycle_hint: bool,
 ) -> Option<Line<'static>> {
-    indicator.map(|indicator| Line::from(vec![indicator.styled_span(show_cycle_hint)]))
+    if indicators.is_empty() {
+        return None;
+    }
+    let mut line = Line::from("");
+    for (idx, indicator) in indicators.iter().enumerate() {
+        if idx > 0 {
+            line.push_span(" · ".dim());
+        }
+        line.push_span(indicator.styled_span(show_cycle_hint));
+    }
+    Some(line)
 }
 
 fn right_aligned_x(area: Rect, content_width: u16) -> Option<u16> {
@@ -584,7 +587,7 @@ pub(crate) fn render_footer_hint_items(area: Rect, buf: &mut Buffer, items: &[(S
 /// formats the chosen/default content.
 fn footer_from_props_lines(
     props: &FooterProps,
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    footer_indicators: &[FooterIndicator],
     show_cycle_hint: bool,
     show_shortcuts_hint: bool,
     show_queue_hint: bool,
@@ -608,7 +611,7 @@ fn footer_from_props_lines(
                 },
                 show_cycle_hint,
             };
-            vec![left_side_line(collaboration_mode_indicator, state)]
+            vec![left_side_line(footer_indicators, state)]
         }
         FooterMode::ShortcutOverlay => {
             let state = ShortcutsState {
@@ -631,7 +634,7 @@ fn footer_from_props_lines(
                 },
                 show_cycle_hint,
             };
-            vec![left_side_line(collaboration_mode_indicator, state)]
+            vec![left_side_line(footer_indicators, state)]
         }
     }
 }
@@ -690,14 +693,14 @@ pub(crate) fn uses_passive_footer_status_layout(props: &FooterProps) -> bool {
 
 pub(crate) fn footer_line_width(
     props: &FooterProps,
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    footer_indicators: &[FooterIndicator],
     show_cycle_hint: bool,
     show_shortcuts_hint: bool,
     show_queue_hint: bool,
 ) -> u16 {
     footer_from_props_lines(
         props,
-        collaboration_mode_indicator,
+        footer_indicators,
         show_cycle_hint,
         show_shortcuts_hint,
         show_queue_hint,
@@ -1088,16 +1091,14 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn snapshot_footer(name: &str, props: FooterProps) {
-        snapshot_footer_with_mode_indicator(
-            name, /*width*/ 80, &props, /*collaboration_mode_indicator*/ None,
-        );
+        snapshot_footer_with_indicators(name, /*width*/ 80, &props, &[]);
     }
 
     fn draw_footer_frame<B: Backend>(
         terminal: &mut Terminal<B>,
         height: u16,
         props: &FooterProps,
-        collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+        footer_indicators: &[FooterIndicator],
     ) {
         terminal
             .draw(|f| {
@@ -1125,10 +1126,10 @@ mod tests {
                 } else {
                     None
                 };
-                let left_mode_indicator = if status_line_active {
-                    None
+                let left_footer_indicators = if status_line_active {
+                    &[][..]
                 } else {
-                    collaboration_mode_indicator
+                    footer_indicators
                 };
                 let available_width = area.width.saturating_sub(FOOTER_INDENT_COLS as u16) as usize;
                 let mut truncated_status_line = if status_line_active
@@ -1151,18 +1152,16 @@ mod tests {
                 } else {
                     footer_line_width(
                         props,
-                        left_mode_indicator,
+                        left_footer_indicators,
                         show_cycle_hint,
                         show_shortcuts_hint,
                         show_queue_hint,
                     )
                 };
                 let right_line = if status_line_active {
-                    let full = mode_indicator_line(collaboration_mode_indicator, show_cycle_hint);
-                    let compact = mode_indicator_line(
-                        collaboration_mode_indicator,
-                        /*show_cycle_hint*/ false,
-                    );
+                    let full = mode_indicator_line(footer_indicators, show_cycle_hint);
+                    let compact =
+                        mode_indicator_line(footer_indicators, /*show_cycle_hint*/ false);
                     let full_width = full.as_ref().map(|line| line.width() as u16).unwrap_or(0);
                     if can_show_left_with_context(area, left_width, full_width) {
                         full
@@ -1209,7 +1208,7 @@ mod tests {
                         let (summary_left, show_context) = single_line_footer_layout(
                             area,
                             right_width,
-                            left_mode_indicator,
+                            left_footer_indicators,
                             show_cycle_hint,
                             show_shortcuts_hint,
                             show_queue_hint,
@@ -1220,7 +1219,7 @@ mod tests {
                                     area,
                                     f.buffer_mut(),
                                     props,
-                                    left_mode_indicator,
+                                    left_footer_indicators,
                                     show_cycle_hint,
                                     show_shortcuts_hint,
                                     show_queue_hint,
@@ -1240,7 +1239,7 @@ mod tests {
                         area,
                         f.buffer_mut(),
                         props,
-                        left_mode_indicator,
+                        left_footer_indicators,
                         show_cycle_hint,
                         show_shortcuts_hint,
                         show_queue_hint,
@@ -1261,26 +1260,26 @@ mod tests {
             .unwrap();
     }
 
-    fn snapshot_footer_with_mode_indicator(
+    fn snapshot_footer_with_indicators(
         name: &str,
         width: u16,
         props: &FooterProps,
-        collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+        footer_indicators: &[FooterIndicator],
     ) {
         let height = footer_height(props).max(1);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        draw_footer_frame(&mut terminal, height, props, collaboration_mode_indicator);
+        draw_footer_frame(&mut terminal, height, props, footer_indicators);
         assert_snapshot!(name, terminal.backend());
     }
 
-    fn render_footer_with_mode_indicator(
+    fn render_footer_with_indicators(
         width: u16,
         props: &FooterProps,
-        collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+        footer_indicators: &[FooterIndicator],
     ) -> String {
         let height = footer_height(props).max(1);
         let mut terminal = Terminal::new(VT100Backend::new(width, height)).expect("terminal");
-        draw_footer_frame(&mut terminal, height, props, collaboration_mode_indicator);
+        draw_footer_frame(&mut terminal, height, props, footer_indicators);
         terminal.backend().vt100().screen().contents()
     }
 
@@ -1481,18 +1480,18 @@ mod tests {
             active_agent_label: None,
         };
 
-        snapshot_footer_with_mode_indicator(
+        snapshot_footer_with_indicators(
             "footer_mode_indicator_wide",
             /*width*/ 120,
             &props,
-            Some(CollaborationModeIndicator::Plan),
+            &[FooterIndicator::Plan],
         );
 
-        snapshot_footer_with_mode_indicator(
+        snapshot_footer_with_indicators(
             "footer_mode_indicator_narrow_overlap_hides",
             /*width*/ 50,
             &props,
-            Some(CollaborationModeIndicator::Plan),
+            &[FooterIndicator::Plan],
         );
 
         let props = FooterProps {
@@ -1510,11 +1509,18 @@ mod tests {
             active_agent_label: None,
         };
 
-        snapshot_footer_with_mode_indicator(
+        snapshot_footer_with_indicators(
             "footer_mode_indicator_running_hides_hint",
             /*width*/ 120,
             &props,
-            Some(CollaborationModeIndicator::Plan),
+            &[FooterIndicator::Plan],
+        );
+
+        snapshot_footer_with_indicators(
+            "footer_autoprompt_indicator_wide",
+            /*width*/ 120,
+            &props,
+            &[FooterIndicator::Autoprompt],
         );
 
         let props = FooterProps {
@@ -1583,11 +1589,11 @@ mod tests {
             active_agent_label: None,
         };
 
-        snapshot_footer_with_mode_indicator(
+        snapshot_footer_with_indicators(
             "footer_status_line_enabled_mode_right",
             /*width*/ 120,
             &props,
-            Some(CollaborationModeIndicator::Plan),
+            &[FooterIndicator::Plan],
         );
 
         let props = FooterProps {
@@ -1605,11 +1611,11 @@ mod tests {
             active_agent_label: None,
         };
 
-        snapshot_footer_with_mode_indicator(
+        snapshot_footer_with_indicators(
             "footer_status_line_disabled_context_right",
             /*width*/ 120,
             &props,
-            Some(CollaborationModeIndicator::Plan),
+            &[FooterIndicator::Plan],
         );
 
         let props = FooterProps {
@@ -1628,11 +1634,11 @@ mod tests {
         };
 
         // has status line and no collaboration mode
-        snapshot_footer_with_mode_indicator(
+        snapshot_footer_with_indicators(
             "footer_status_line_enabled_no_mode_right",
             /*width*/ 120,
             &props,
-            /*collaboration_mode_indicator*/ None,
+            &[],
         );
 
         let props = FooterProps {
@@ -1652,11 +1658,11 @@ mod tests {
             active_agent_label: None,
         };
 
-        snapshot_footer_with_mode_indicator(
+        snapshot_footer_with_indicators(
             "footer_status_line_truncated_with_gap",
             /*width*/ 40,
             &props,
-            Some(CollaborationModeIndicator::Plan),
+            &[FooterIndicator::Plan],
         );
 
         let props = FooterProps {
@@ -1714,11 +1720,8 @@ mod tests {
             active_agent_label: None,
         };
 
-        let screen = render_footer_with_mode_indicator(
-            /*width*/ 80,
-            &props,
-            Some(CollaborationModeIndicator::Plan),
-        );
+        let screen =
+            render_footer_with_indicators(/*width*/ 80, &props, &[FooterIndicator::Plan]);
         let collapsed = screen.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             collapsed.contains("Plan mode"),

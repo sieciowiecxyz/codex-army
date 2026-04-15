@@ -151,6 +151,9 @@ impl ChatWidget {
             SlashCommand::Plan => {
                 self.apply_plan_slash_command();
             }
+            SlashCommand::Autoprompt => {
+                self.toggle_autoprompt();
+            }
             SlashCommand::Collab => {
                 if !self.collaboration_modes_enabled() {
                     self.add_info_message(
@@ -473,6 +476,23 @@ impl ChatWidget {
                 } else {
                     self.queue_user_message(user_message);
                 }
+            }
+            SlashCommand::Autoprompt if !trimmed.is_empty() => {
+                let Some((prepared_args, _prepared_elements)) = self
+                    .bottom_pane
+                    .prepare_inline_args_submission(/*record_history*/ false)
+                else {
+                    return;
+                };
+                let prompt = prepared_args.trim().to_string();
+                if prompt.is_empty() {
+                    self.add_error_message(
+                        "Usage: /autoprompt <completion-check prompt>".to_string(),
+                    );
+                    return;
+                }
+                self.set_autoprompt_prompt(prompt);
+                self.bottom_pane.drain_pending_submission_state();
             }
             SlashCommand::Review if !trimmed.is_empty() => {
                 let Some((prepared_args, _prepared_elements)) = self

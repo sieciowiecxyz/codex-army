@@ -85,7 +85,7 @@ mod prompt_args;
 mod skill_popup;
 mod skills_toggle_view;
 mod slash_commands;
-pub(crate) use footer::CollaborationModeIndicator;
+pub(crate) use footer::FooterIndicator;
 pub(crate) use list_selection_view::ColumnWidthMode;
 pub(crate) use list_selection_view::SelectionViewParams;
 pub(crate) use list_selection_view::SideContentWidth;
@@ -311,11 +311,8 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    pub fn set_collaboration_mode_indicator(
-        &mut self,
-        indicator: Option<CollaborationModeIndicator>,
-    ) {
-        self.composer.set_collaboration_mode_indicator(indicator);
+    pub fn set_footer_indicators(&mut self, indicators: Vec<FooterIndicator>) {
+        self.composer.set_footer_indicators(indicators);
         self.request_redraw();
     }
 

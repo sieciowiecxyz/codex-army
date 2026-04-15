@@ -290,6 +290,8 @@ pub fn process_responses_event(
                         response_error = ApiError::InvalidRequest { message };
                     } else if is_server_overloaded_error(&error) {
                         response_error = ApiError::ServerOverloaded;
+                    } else if error.code.as_deref() == Some("rate_limit_exceeded") {
+                        response_error = ApiError::RateLimit(error.message.unwrap_or_default());
                     } else {
                         let delay = try_parse_retry_after(&error);
                         let message = error.message.unwrap_or_default();

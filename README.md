@@ -37,7 +37,7 @@ either:
 
 - finishes the task
 - reports that it is blocked
-- or fails the required JSON status format too many times
+- or hits a safety cutoff for too many rapid auto-turns
 
 Why this exists:
 
@@ -49,11 +49,14 @@ Why this exists:
 What `/autoprompt` does:
 
 - you give the agent a completion-check prompt
-- after each turn the model must return a small JSON status
-- if the model says it should continue, Codex Army automatically prompts it to
-  continue working
-- the loop stops only when the model returns `done`, `blocked`, or repeatedly
-  fails the JSON contract
+- if the task is truly finished, the model returns only `DONE`
+- if the model is truly blocked, it returns only `BLOCKED`
+- if the task is not finished and the model can still proceed, it does not need
+  to return a status at all and should simply keep working
+- Codex Army automatically re-prompts the same thread so the agent keeps going
+  instead of stopping on a partial result
+- if `/autoprompt` triggers three rapid auto-turns within one minute, it stops
+  itself as a failsafe to avoid request spam
 
 This is meant to reduce the common problem where the agent leaves work half-done
 and exits too early.

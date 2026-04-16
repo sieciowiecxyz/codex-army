@@ -152,13 +152,13 @@ async fn autoprompt_slash_command_stores_prompt_and_toggles() {
 
     submit_composer_text(
         &mut chat,
-        "/autoprompt Did you finish feature X? Return only JSON with status.",
+        "/autoprompt Did you finish feature X? Return only DONE or BLOCKED.",
     );
 
     assert!(chat.autoprompt.enabled);
     assert_eq!(
         chat.autoprompt.checker_prompt.as_deref(),
-        Some("Did you finish feature X? Return only JSON with status.")
+        Some("Did you finish feature X? Return only DONE or BLOCKED.")
     );
     assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
     let rendered = drain_insert_history(&mut rx)
@@ -181,26 +181,94 @@ async fn autoprompt_slash_command_stores_prompt_and_toggles() {
 }
 
 #[tokio::test]
-async fn autoprompt_turn_complete_continue_queues_follow_up() {
+async fn autoprompt_turn_complete_without_status_queues_follow_up() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_autoprompt_prompt("Did you finish feature X?".to_string());
 
     chat.handle_codex_event(Event {
         id: "turn-1".into(),
-        msg: EventMsg::TurnComplete(turn_complete_event(
-            "turn-1",
-            Some(r#"{"status":"continue","reason":"still working"}"#),
-        )),
+        msg: EventMsg::TurnComplete(turn_complete_event("turn-1", Some("Still working."))),
     });
 
     assert!(chat.autoprompt.enabled);
-    assert_eq!(chat.autoprompt.invalid_json_streak, 0);
+    assert_eq!(chat.autoprompt.recent_auto_turns.len(), 1);
     assert_eq!(chat.queued_user_messages.len(), 1);
     assert!(
         chat.queued_user_messages[0]
             .text
             .contains("Did you finish feature X?"),
     );
+    assert!(
+        chat.queued_user_messages[0]
+            .text
+            .contains("return only DONE"),
+    );
+}
+
+#[tokio::test]
+async fn autoprompt_turn_complete_done_disables_autoprompt() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_autoprompt_prompt("Did you finish feature X?".to_string());
+
+    chat.handle_codex_event(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::TurnComplete(turn_complete_event("turn-1", Some("DONE"))),
+    });
+
+    assert!(!chat.autoprompt.enabled);
+    assert!(chat.queued_user_messages.is_empty());
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|cell| lines_to_single_string(&cell))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("Autoprompt finished: done."));
+}
+
+#[tokio::test]
+async fn autoprompt_turn_complete_blocked_disables_autoprompt() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_autoprompt_prompt("Did you finish feature X?".to_string());
+
+    chat.handle_codex_event(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::TurnComplete(turn_complete_event("turn-1", Some("BLOCKED"))),
+    });
+
+    assert!(!chat.autoprompt.enabled);
+    assert!(chat.queued_user_messages.is_empty());
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|cell| lines_to_single_string(&cell))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("Autoprompt finished: blocked."));
+}
+
+#[tokio::test]
+async fn autoprompt_turn_complete_rapid_auto_turns_disable_autoprompt() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_autoprompt_prompt("Did you finish feature X?".to_string());
+
+    for turn_id in ["turn-1", "turn-2", "turn-3"] {
+        chat.queued_user_messages.clear();
+        chat.handle_codex_event(Event {
+            id: turn_id.into(),
+            msg: EventMsg::TurnComplete(turn_complete_event(turn_id, Some("Still working."))),
+        });
+    }
+
+    assert!(!chat.autoprompt.enabled);
+    assert!(chat.queued_user_messages.is_empty());
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|cell| lines_to_single_string(&cell))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("Autoprompt stopped after 3 rapid auto-turns within 1 minute."));
 }
 
 #[tokio::test]

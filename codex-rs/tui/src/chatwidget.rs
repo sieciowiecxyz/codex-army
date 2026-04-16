@@ -1058,15 +1058,17 @@ impl ThreadComposerState {
 struct AutopromptState {
     enabled: bool,
     checker_prompt: Option<String>,
-    invalid_json_streak: u8,
+    recent_auto_turns: VecDeque<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutopromptStatus {
     Done,
-    Continue,
     Blocked,
 }
+
+const AUTOPROMPT_MAX_AUTO_TURNS_PER_WINDOW: usize = 3;
+const AUTOPROMPT_AUTO_TURN_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ThreadInputState {
@@ -2549,40 +2551,26 @@ impl ChatWidget {
             .unwrap_or_default();
         match Self::parse_autoprompt_status(response) {
             Some(AutopromptStatus::Done) => {
-                self.autoprompt.invalid_json_streak = 0;
                 self.disable_autoprompt();
                 self.add_info_message("Autoprompt finished: done.".to_string(), /*hint*/ None);
             }
             Some(AutopromptStatus::Blocked) => {
-                self.autoprompt.invalid_json_streak = 0;
                 self.disable_autoprompt();
                 self.add_info_message(
                     "Autoprompt finished: blocked.".to_string(),
                     /*hint*/ None,
                 );
             }
-            Some(AutopromptStatus::Continue) => {
-                self.autoprompt.invalid_json_streak = 0;
-                self.queued_user_messages.push_front(UserMessage {
-                    text: Self::autoprompt_continue_prompt(&checker_prompt),
-                    local_images: Vec::new(),
-                    remote_image_urls: Vec::new(),
-                    text_elements: Vec::new(),
-                    mention_bindings: Vec::new(),
-                });
-                self.refresh_pending_input_preview();
-            }
             None => {
-                self.autoprompt.invalid_json_streak += 1;
-                if self.autoprompt.invalid_json_streak >= 3 {
+                if self.should_stop_autoprompt_for_rapid_auto_turns() {
                     self.disable_autoprompt();
                     self.add_error_message(
-                        "Autoprompt stopped after 3 invalid JSON responses.".to_string(),
+                        "Autoprompt stopped after 3 rapid auto-turns within 1 minute.".to_string(),
                     );
                     return;
                 }
                 self.queued_user_messages.push_front(UserMessage {
-                    text: Self::autoprompt_repair_prompt(&checker_prompt),
+                    text: Self::autoprompt_continue_prompt(&checker_prompt),
                     local_images: Vec::new(),
                     remote_image_urls: Vec::new(),
                     text_elements: Vec::new(),
@@ -2598,38 +2586,29 @@ impl ChatWidget {
         if trimmed.is_empty() {
             return None;
         }
-        let candidate = if trimmed.starts_with("```") {
-            let without_open = trimmed
-                .strip_prefix("```json")
-                .or_else(|| trimmed.strip_prefix("```"))?;
-            let (body, trailing) = without_open.rsplit_once("```")?;
-            if !trailing.trim().is_empty() {
-                return None;
-            }
-            body.trim()
-        } else {
-            trimmed
-        };
-        let value: serde_json::Value = serde_json::from_str(candidate).ok()?;
-        let status = value.get("status")?.as_str()?;
-        match status {
-            "done" => Some(AutopromptStatus::Done),
-            "continue" => Some(AutopromptStatus::Continue),
-            "blocked" => Some(AutopromptStatus::Blocked),
+        match trimmed {
+            "DONE" => Some(AutopromptStatus::Done),
+            "BLOCKED" => Some(AutopromptStatus::Blocked),
             _ => None,
         }
     }
 
     fn autoprompt_continue_prompt(checker_prompt: &str) -> String {
         format!(
-            "Autoprompt is active.\n\nEvaluate your progress against this instruction:\n{checker_prompt}\n\nContinue working on the task. When you stop, return only a JSON object with this schema:\n{{\"status\":\"done|continue|blocked\",\"reason\":\"...\"}}"
+            "Autoprompt is active.\n\nEvaluate your progress against this instruction:\n{checker_prompt}\n\nIf the task is fully done, return only DONE.\nIf you are truly blocked, return only BLOCKED.\nIf the task is not done and you are not blocked, think about what remains and continue working."
         )
     }
 
-    fn autoprompt_repair_prompt(checker_prompt: &str) -> String {
-        format!(
-            "Autoprompt is active.\n\nYour previous message did not match the required format.\nEvaluate your progress against this instruction:\n{checker_prompt}\n\nReturn only a JSON object with this schema:\n{{\"status\":\"done|continue|blocked\",\"reason\":\"...\"}}\nIf the task is not complete and you are not blocked, continue working and finish with that JSON."
-        )
+    fn should_stop_autoprompt_for_rapid_auto_turns(&mut self) -> bool {
+        let now = Instant::now();
+        self.autoprompt.recent_auto_turns.push_back(now);
+        while let Some(timestamp) = self.autoprompt.recent_auto_turns.front() {
+            if now.duration_since(*timestamp) <= AUTOPROMPT_AUTO_TURN_WINDOW {
+                break;
+            }
+            self.autoprompt.recent_auto_turns.pop_front();
+        }
+        self.autoprompt.recent_auto_turns.len() >= AUTOPROMPT_MAX_AUTO_TURNS_PER_WINDOW
     }
 
     fn pop_next_queued_user_message(&mut self) -> Option<UserMessage> {
@@ -9676,7 +9655,7 @@ impl ChatWidget {
     fn set_autoprompt_prompt(&mut self, prompt: String) {
         self.autoprompt.checker_prompt = Some(prompt);
         self.autoprompt.enabled = true;
-        self.autoprompt.invalid_json_streak = 0;
+        self.autoprompt.recent_auto_turns.clear();
         self.update_footer_indicators();
         self.add_info_message("Autoprompt on.".to_string(), /*hint*/ None);
     }
@@ -9687,7 +9666,7 @@ impl ChatWidget {
             return;
         }
         self.autoprompt.enabled = !self.autoprompt.enabled;
-        self.autoprompt.invalid_json_streak = 0;
+        self.autoprompt.recent_auto_turns.clear();
         self.update_footer_indicators();
         let status = if self.autoprompt.enabled { "on" } else { "off" };
         self.add_info_message(format!("Autoprompt {status}."), /*hint*/ None);
@@ -9695,7 +9674,7 @@ impl ChatWidget {
 
     fn disable_autoprompt(&mut self) {
         self.autoprompt.enabled = false;
-        self.autoprompt.invalid_json_streak = 0;
+        self.autoprompt.recent_auto_turns.clear();
         self.update_footer_indicators();
     }
 

@@ -63,17 +63,17 @@ and exits too early.
 
 ## Install
 
-Build and install the forked CLI binary as `codex-army`:
+Build and install the forked CLI binary as `codex`:
 
 ```bash
 cd codex-rs
-cargo install --path cli --bin codex-army --force --locked
+cargo install --path cli --bin codex --force --locked
 ```
 
 Then run:
 
 ```bash
-codex-army
+codex
 ```
 
 ## Relationship to upstream
@@ -86,7 +86,7 @@ This project is still based on OpenAI Codex:
 The fork tries to stay conservative:
 
 - no broad repo-wide rebrand
-- minimal CLI branding for `codex-army`
+- minimal CLI branding for `codex`
 - fork logic kept mostly in TUI slash-command flow and auth retry flow
 
 That does not guarantee conflict-free merges, but it is designed to make future

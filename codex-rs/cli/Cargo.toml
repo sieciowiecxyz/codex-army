@@ -9,10 +9,6 @@ build = "build.rs"
 name = "codex"
 path = "src/main.rs"
 
-[[bin]]
-name = "codex-army"
-path = "src/main.rs"
-
 [lib]
 name = "codex_cli"
 path = "src/lib.rs"
@@ -41,6 +37,8 @@ codex-features = { workspace = true }
 codex-login = { workspace = true }
 codex-mcp = { workspace = true }
 codex-mcp-server = { workspace = true }
+codex-models-manager = { workspace = true }
+codex-model-provider = { workspace = true }
 codex-protocol = { workspace = true }
 codex-responses-api-proxy = { workspace = true }
 codex-rmcp-client = { workspace = true }

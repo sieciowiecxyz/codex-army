@@ -9,7 +9,7 @@ This fork keeps a minimal diff against upstream `openai/codex` and currently add
 
 ```bash
 cd codex-rs
-cargo install --path cli --bin codex-army --force --locked
+cargo install --path cli --bin codex --force --locked
 ```
 
 ## Goals
@@ -20,6 +20,6 @@ cargo install --path cli --bin codex-army --force --locked
 
 ## Fork surface
 
-- `codex-rs/cli`: lightweight `codex-army` binary target and CLI naming
+- `codex-rs/cli`: lightweight `codex` binary target and CLI naming
 - `codex-rs/tui`: `/autoprompt` command and session loop
 - `codex-rs/core` plus `codex-rs/codex-api`: account failover on usage/rate limits

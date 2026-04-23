@@ -2773,9 +2773,7 @@ impl ChatWidget {
     }
 
     fn autoprompt_continue_prompt(checker_prompt: &str) -> String {
-        format!(
-            "Autoprompt is active.\n\nEvaluate your progress against this instruction:\n{checker_prompt}\n\nIf the task is fully done, return only DONE.\nIf you are truly blocked, return only BLOCKED.\nIf the task is not done and you are not blocked, think about what remains and continue working."
-        )
+        checker_prompt.to_string()
     }
 
     fn should_stop_autoprompt_for_rapid_auto_turns(&mut self) -> bool {

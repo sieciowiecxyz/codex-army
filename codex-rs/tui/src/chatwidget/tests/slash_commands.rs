@@ -766,15 +766,9 @@ async fn autoprompt_turn_complete_without_status_queues_follow_up() {
     assert!(chat.autoprompt.enabled);
     assert_eq!(chat.autoprompt.recent_auto_turns.len(), 1);
     assert_eq!(chat.queued_user_messages.len(), 1);
-    assert!(
-        chat.queued_user_messages[0]
-            .text
-            .contains("Did you finish feature X?"),
-    );
-    assert!(
-        chat.queued_user_messages[0]
-            .text
-            .contains("return only DONE"),
+    assert_eq!(
+        chat.queued_user_messages[0].text,
+        "Did you finish feature X?"
     );
 }
 

@@ -584,13 +584,7 @@ impl ChatWidget {
                 }
             }
             SlashCommand::Autoprompt if !trimmed.is_empty() => {
-                let Some((prepared_args, _prepared_elements)) = self
-                    .bottom_pane
-                    .prepare_inline_args_submission(/*record_history*/ false)
-                else {
-                    return;
-                };
-                let prompt = prepared_args.trim().to_string();
+                let prompt = args.trim().to_string();
                 if prompt.is_empty() {
                     self.add_error_message(
                         "Usage: /autoprompt <completion-check prompt>".to_string(),

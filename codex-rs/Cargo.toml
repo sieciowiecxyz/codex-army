@@ -456,14 +456,17 @@ debug = 0
 strip = true
 
 [profile.release]
-lto = "fat"
+# Prefer a materially faster local install/build while keeping cross-crate
+# optimization enabled.
+lto = "thin"
 split-debuginfo = "off"
 # Because we bundle some of these executables with the TypeScript CLI, we
 # remove everything to make the binary as small as possible.
 strip = "symbols"
 
-# See https://github.com/openai/codex/issues/1411 for details.
-codegen-units = 1
+# Keep some parallelism during release builds instead of forcing a single
+# extremely slow final codegen pass.
+codegen-units = 8
 
 [profile.ci-test]
 debug = 1         # Reduce debug symbol size

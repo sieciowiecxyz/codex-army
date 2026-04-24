@@ -24,6 +24,7 @@
 //! fails, normal stream retry/fallback logic handles recovery on the same turn.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
@@ -138,6 +139,7 @@ pub const X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER: &str =
     "x-responsesapi-include-timing-metrics";
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
 const RESPONSES_ENDPOINT: &str = "/responses";
+static RATE_LIMIT_ACCOUNT_SWITCH_COMMAND: OnceLock<StdMutex<Option<OsString>>> = OnceLock::new();
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
 const MEMORIES_SUMMARIZE_ENDPOINT: &str = "/memories/trace_summarize";
 #[cfg(test)]
@@ -349,7 +351,7 @@ impl ModelClient {
         let Some(auth_manager) = self.auth_manager() else {
             return false;
         };
-        let output = match Command::new("codex-accounts")
+        let output = match Command::new(rate_limit_account_switch_command())
             .arg("use-best")
             .output()
             .await
@@ -378,6 +380,12 @@ impl ModelClient {
         }
         self.store_cached_websocket_session(WebsocketSession::default());
         true
+    }
+
+    #[doc(hidden)]
+    pub fn set_rate_limit_account_switch_command_for_tests(command: Option<OsString>) {
+        let lock = RATE_LIMIT_ACCOUNT_SWITCH_COMMAND.get_or_init(|| StdMutex::new(None));
+        *lock.lock().unwrap() = command;
     }
 
     pub(crate) fn set_window_generation(&self, window_generation: u64) {
@@ -843,6 +851,17 @@ impl ModelClient {
         }
         headers
     }
+}
+
+fn rate_limit_account_switch_command() -> OsString {
+    if let Some(command) = RATE_LIMIT_ACCOUNT_SWITCH_COMMAND
+        .get()
+        .and_then(|lock| lock.lock().ok().and_then(|guard| guard.clone()))
+    {
+        return command;
+    }
+
+    OsString::from("codex-accounts")
 }
 
 impl Drop for ModelClientSession {

@@ -1,6 +1,8 @@
 #![allow(clippy::expect_used)]
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -37,8 +39,14 @@ use core_test_support::wait_for_event_match;
 use core_test_support::wait_for_event_with_timeout;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use serial_test::serial;
+use tempfile::TempDir;
 use tokio::time::Duration;
+use wiremock::Mock;
+use wiremock::Respond;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path_regex;
 
 fn approx_token_count(text: &str) -> i64 {
     i64::try_from(text.len().saturating_add(3) / 4).unwrap_or(i64::MAX)
@@ -1139,6 +1147,125 @@ async fn remote_manual_compact_failure_emits_task_error_event() -> Result<()> {
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 
     assert_eq!(compact_mock.requests().len(), 1);
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(remote_compact_rate_limit_failover)]
+async fn remote_manual_compact_usage_limit_switches_account_and_retries() -> Result<()> {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(
+        test_codex().with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+    )
+    .await?;
+    let codex = harness.test().codex.clone();
+
+    let temp_dir = TempDir::new()?;
+    let script_path = temp_dir.path().join("codex-accounts");
+    let log_path = temp_dir.path().join("codex-accounts.log");
+    fs::write(
+        &script_path,
+        format!(
+            "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" > {:?}\nexit 0\n",
+            log_path
+        ),
+    )?;
+    let mut permissions = fs::metadata(&script_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script_path, permissions)?;
+
+    struct ResetCommandOverride;
+
+    impl Drop for ResetCommandOverride {
+        fn drop(&mut self) {
+            codex_core::test_support::set_rate_limit_account_switch_command_for_tests(None);
+        }
+    }
+
+    let _reset = ResetCommandOverride;
+    codex_core::test_support::set_rate_limit_account_switch_command_for_tests(Some(script_path));
+
+    mount_sse_once(
+        harness.server(),
+        sse(vec![
+            responses::ev_assistant_message("m1", "REMOTE_REPLY"),
+            responses::ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+
+    #[derive(Debug)]
+    struct SeqResponder {
+        num_calls: AtomicUsize,
+        responses: Vec<ResponseTemplate>,
+    }
+
+    impl Respond for SeqResponder {
+        fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+            let call_num = self.num_calls.fetch_add(1, Ordering::SeqCst);
+            self.responses
+                .get(call_num)
+                .unwrap_or_else(|| panic!("no response for {call_num}"))
+                .clone()
+        }
+    }
+
+    let compact_responses = vec![
+        ResponseTemplate::new(429)
+            .insert_header("x-codex-primary-used-percent", "100.0")
+            .insert_header("x-codex-secondary-used-percent", "87.5")
+            .insert_header("x-codex-primary-over-secondary-limit-percent", "95.0")
+            .insert_header("x-codex-primary-window-minutes", "15")
+            .insert_header("x-codex-secondary-window-minutes", "60")
+            .set_body_json(json!({
+                "error": {
+                    "type": "usage_limit_reached",
+                    "message": "limit reached",
+                    "resets_at": 1704067242,
+                    "plan_type": "pro"
+                }
+            })),
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "application/json")
+            .set_body_json(json!({
+                "output": compacted_summary_only_output("compact summary")
+            })),
+    ];
+
+    let responder = SeqResponder {
+        num_calls: AtomicUsize::new(0),
+        responses: compact_responses,
+    };
+    Mock::given(method("POST"))
+        .and(path_regex(".*/responses/compact$"))
+        .respond_with(responder)
+        .expect(2)
+        .mount(harness.server())
+        .await;
+
+    codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: "manual remote compact".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+        })
+        .await?;
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    codex.submit(Op::Compact).await?;
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    assert_eq!(fs::read_to_string(&log_path)?.trim(), "use-best");
 
     Ok(())
 }

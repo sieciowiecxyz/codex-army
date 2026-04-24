@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::Prompt;
+use crate::client::should_attempt_rate_limit_account_switch;
 use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::InitialContextInjection;
 use crate::compact::compaction_status_from_result;
@@ -26,8 +27,8 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::protocol::WarningEvent;
 use codex_rollout_trace::CompactionCheckpointTracePayload;
-use futures::TryFutureExt;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
@@ -173,30 +174,55 @@ async fn run_remote_compact_task_inner_impl(
         output_schema: None,
         output_schema_strict: true,
     };
-    let mut new_history = sess
-        .services
-        .model_client
-        .compact_conversation_history(
-            &prompt,
-            &turn_context.model_info,
-            turn_context.reasoning_effort,
-            turn_context.reasoning_summary,
-            &turn_context.session_telemetry,
-            &compaction_trace,
-        )
-        .or_else(|err| async {
-            let total_usage_breakdown = sess.get_total_token_usage_breakdown().await;
-            let compact_request_log_data =
-                build_compact_request_log_data(&prompt.input, &prompt.base_instructions.text);
-            log_remote_compact_failure(
-                turn_context,
-                &compact_request_log_data,
-                total_usage_breakdown,
-                &err,
-            );
+    let mut rate_limit_failover_attempted = false;
+    let mut new_history = loop {
+        match sess
+            .services
+            .model_client
+            .compact_conversation_history(
+                &prompt,
+                &turn_context.model_info,
+                turn_context.reasoning_effort,
+                turn_context.reasoning_summary,
+                &turn_context.session_telemetry,
+                &compaction_trace,
+            )
+            .await
+        {
+            Ok(new_history) => break new_history,
             Err(err)
-        })
-        .await?;
+                if !rate_limit_failover_attempted
+                    && should_attempt_rate_limit_account_switch(&err)
+                    && sess
+                        .services
+                        .model_client
+                        .try_switch_account_after_rate_limit()
+                        .await =>
+            {
+                sess.send_event(
+                    turn_context,
+                    EventMsg::Warning(WarningEvent {
+                        message: "Rate limit reached. Switched account and retrying.".to_string(),
+                    }),
+                )
+                .await;
+                rate_limit_failover_attempted = true;
+                continue;
+            }
+            Err(err) => {
+                let total_usage_breakdown = sess.get_total_token_usage_breakdown().await;
+                let compact_request_log_data =
+                    build_compact_request_log_data(&prompt.input, &prompt.base_instructions.text);
+                log_remote_compact_failure(
+                    turn_context,
+                    &compact_request_log_data,
+                    total_usage_breakdown,
+                    &err,
+                );
+                return Err(err);
+            }
+        }
+    };
     new_history = process_compacted_history(
         sess.as_ref(),
         turn_context.as_ref(),

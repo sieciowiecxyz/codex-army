@@ -49,6 +49,12 @@ pub fn auth_manager_from_auth_with_home(auth: CodexAuth, codex_home: PathBuf) ->
     AuthManager::from_auth_for_testing_with_home(auth, codex_home)
 }
 
+pub fn set_rate_limit_account_switch_command_for_tests(command: Option<PathBuf>) {
+    crate::client::ModelClient::set_rate_limit_account_switch_command_for_tests(
+        command.map(Into::into),
+    );
+}
+
 pub fn thread_manager_with_models_provider(
     auth: CodexAuth,
     provider: ModelProviderInfo,

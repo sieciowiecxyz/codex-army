@@ -532,6 +532,9 @@ pub(crate) enum AppEvent {
     /// Update the current model slug in the running app and widget.
     UpdateModel(String),
 
+    /// Update the model provider in the running app and widget.
+    UpdateModelProvider(String),
+
     /// Update the active collaboration mask in the running app and widget.
     UpdateCollaborationMode(CollaborationModeMask),
 
@@ -542,6 +545,7 @@ pub(crate) enum AppEvent {
     PersistModelSelection {
         model: String,
         effort: Option<ReasoningEffort>,
+        model_provider: Option<String>,
     },
 
     /// Persist the selected personality to the appropriate config.

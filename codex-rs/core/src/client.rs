@@ -345,6 +345,42 @@ impl ModelClient {
         }
     }
 
+    /// Creates a fresh turn-scoped session for a possibly different provider.
+    ///
+    /// The primary `ModelClient` is session-scoped and is constructed from the
+    /// startup provider. Runtime model switches can change the effective
+    /// provider for a turn, so that turn must not reuse the startup provider's
+    /// websocket/cache state.
+    pub fn new_session_for_provider(&self, provider_info: ModelProviderInfo) -> ModelClientSession {
+        if self.uses_provider(&provider_info) {
+            return self.new_session();
+        }
+
+        let client = ModelClient::new(
+            self.state.provider.auth_manager(),
+            self.state.conversation_id,
+            self.state.installation_id.clone(),
+            provider_info,
+            self.state.session_source.clone(),
+            self.state.model_verbosity,
+            self.state.enable_request_compression,
+            self.state.include_timing_metrics,
+            self.state.beta_features_header.clone(),
+        );
+        client.set_window_generation(self.state.window_generation.load(Ordering::Relaxed));
+        if self.state.disable_websockets.load(Ordering::Relaxed) {
+            client
+                .state
+                .disable_websockets
+                .store(true, Ordering::Relaxed);
+        }
+        client.new_session()
+    }
+
+    pub fn uses_provider(&self, provider_info: &ModelProviderInfo) -> bool {
+        self.state.provider.info() == provider_info
+    }
+
     pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.state.provider.auth_manager()
     }
@@ -875,6 +911,10 @@ impl Drop for ModelClientSession {
 }
 
 impl ModelClientSession {
+    pub fn uses_provider(&self, provider_info: &ModelProviderInfo) -> bool {
+        self.client.uses_provider(provider_info)
+    }
+
     pub(crate) fn reset_websocket_session(&mut self) {
         self.websocket_session.connection = None;
         self.websocket_session.last_request = None;

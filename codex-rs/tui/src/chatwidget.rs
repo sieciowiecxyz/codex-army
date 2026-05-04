@@ -62,6 +62,7 @@ use crate::legacy_core::DEFAULT_AGENTS_MD_FILENAME;
 use crate::legacy_core::config::Config;
 use crate::legacy_core::config::Constrained;
 use crate::legacy_core::config::ConstraintResult;
+use crate::legacy_core::config::CustomModel;
 #[cfg(target_os = "windows")]
 use crate::legacy_core::windows_sandbox::WindowsSandboxLevelExt;
 use crate::mention_codec::LinkedMention;
@@ -137,6 +138,7 @@ use codex_git_utils::current_branch_name;
 use codex_git_utils::get_git_repo_root;
 use codex_git_utils::local_git_branches;
 use codex_git_utils::recent_commits;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_otel::RuntimeMetricsSummary;
 use codex_otel::SessionTelemetry;
 use codex_plugin::PluginCapabilitySummary;
@@ -5916,6 +5918,7 @@ impl ChatWidget {
             AskForApproval::from(self.config.permissions.approval_policy.value()),
             permission_profile,
             effective_mode.model().to_string(),
+            self.config.model_provider_id.clone(),
             effective_mode.reasoning_effort(),
             /*summary*/ None,
             service_tier,
@@ -7734,7 +7737,7 @@ impl ChatWidget {
             .into_iter()
             .partition(|preset| Self::is_auto_model(&preset.model));
 
-        if auto_presets.is_empty() {
+        if auto_presets.is_empty() && self.config.custom_models.is_empty() {
             self.open_all_models_popup(other_presets);
             return;
         }
@@ -7766,6 +7769,8 @@ impl ChatWidget {
                 }
             })
             .collect();
+
+        self.append_custom_model_items(&mut items);
 
         if !other_presets.is_empty() {
             let all_models = other_presets;
@@ -7816,7 +7821,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_all_models_popup(&mut self, presets: Vec<ModelPreset>) {
-        if presets.is_empty() {
+        if presets.is_empty() && self.config.custom_models.is_empty() {
             self.add_info_message(
                 "No additional models are available right now.".to_string(),
                 /*hint*/ None,
@@ -7848,6 +7853,8 @@ impl ChatWidget {
                 ..Default::default()
             });
         }
+
+        self.append_custom_model_items(&mut items);
 
         let header = self.model_menu_header(
             "Select Model and Effort",
@@ -7925,8 +7932,58 @@ impl ChatWidget {
             tx.send(AppEvent::PersistModelSelection {
                 model: model_for_action.clone(),
                 effort: effort_for_action,
+                model_provider: None,
             });
         })]
+    }
+
+    fn custom_model_selection_actions(custom_model: CustomModel) -> Vec<SelectionAction> {
+        vec![Box::new(move |tx| {
+            tx.send(AppEvent::UpdateModelProvider(
+                custom_model.model_provider_id.clone(),
+            ));
+            tx.send(AppEvent::UpdateModel(custom_model.model.clone()));
+            tx.send(AppEvent::UpdateReasoningEffort(None));
+            tx.send(AppEvent::PersistModelSelection {
+                model: custom_model.model.clone(),
+                effort: None,
+                model_provider: Some(custom_model.model_provider_id.clone()),
+            });
+        })]
+    }
+
+    fn is_current_custom_model(&self, custom_model: &CustomModel) -> bool {
+        self.current_model() == custom_model.model.as_str()
+            && self.config.model_provider_id == custom_model.model_provider_id
+    }
+
+    fn append_custom_model_items(&self, items: &mut Vec<SelectionItem>) {
+        items.extend(
+            self.config
+                .custom_models
+                .iter()
+                .cloned()
+                .map(|custom_model| {
+                    let description = custom_model.description.clone().or_else(|| {
+                        let endpoint = custom_model
+                            .base_url
+                            .clone()
+                            .unwrap_or_else(|| custom_model.provider.clone());
+                        Some(format!(
+                            "Local / OSS via {endpoint} ({})",
+                            custom_model.model
+                        ))
+                    });
+                    SelectionItem {
+                        name: format!("Local / OSS: {}", custom_model.name),
+                        description,
+                        is_current: self.is_current_custom_model(&custom_model),
+                        actions: Self::custom_model_selection_actions(custom_model),
+                        dismiss_on_select: true,
+                        ..Default::default()
+                    }
+                }),
+        );
     }
 
     fn should_prompt_plan_mode_reasoning_scope(
@@ -8005,6 +8062,7 @@ impl ChatWidget {
             tx.send(AppEvent::PersistModelSelection {
                 model: model.clone(),
                 effort,
+                model_provider: None,
             });
         })];
 
@@ -8173,6 +8231,7 @@ impl ChatWidget {
                     tx.send(AppEvent::PersistModelSelection {
                         model: model_for_action.clone(),
                         effort: choice_effort,
+                        model_provider: None,
                     });
                 }
             })];
@@ -8225,8 +8284,11 @@ impl ChatWidget {
 
     fn apply_model_and_effort(&self, model: String, effort: Option<ReasoningEffortConfig>) {
         self.apply_model_and_effort_without_persist(model.clone(), effort);
-        self.app_event_tx
-            .send(AppEvent::PersistModelSelection { model, effort });
+        self.app_event_tx.send(AppEvent::PersistModelSelection {
+            model,
+            effort,
+            model_provider: None,
+        });
     }
 
     /// Open the permissions popup (alias for /permissions).
@@ -9404,6 +9466,17 @@ impl ChatWidget {
         {
             mask.model = Some(model.to_string());
         }
+        self.refresh_model_dependent_surfaces();
+    }
+
+    /// Set the model provider in the widget's config copy.
+    pub(crate) fn set_model_provider(
+        &mut self,
+        model_provider_id: String,
+        model_provider: ModelProviderInfo,
+    ) {
+        self.config.model_provider_id = model_provider_id;
+        self.config.model_provider = model_provider;
         self.refresh_model_dependent_surfaces();
     }
 

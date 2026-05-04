@@ -224,6 +224,10 @@ pub struct ConfigToml {
     #[serde(default, deserialize_with = "deserialize_model_providers")]
     pub model_providers: HashMap<String, ModelProviderInfo>,
 
+    /// User-pinned local OSS models shown in the TUI `/model` picker.
+    #[serde(default)]
+    pub custom_models: Vec<CustomModelToml>,
+
     /// Maximum number of bytes to include from an AGENTS.md project doc file.
     #[serde(default = "default_project_doc_max_bytes")]
     pub project_doc_max_bytes: Option<usize>,
@@ -457,6 +461,21 @@ pub struct ConfigLockfileToml {
 
     /// Replayable effective config captured in the lockfile.
     pub config: ConfigToml,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct CustomModelToml {
+    /// User-facing label shown in `/model`. Defaults to `model`.
+    pub name: Option<String>,
+    /// Model id sent to the local provider, for example `google/gemma-4-26b-a4b`.
+    pub model: String,
+    /// Local provider id. Initially `lmstudio` or `ollama`.
+    pub provider: String,
+    /// Optional provider base URL override for this entry.
+    pub base_url: Option<String>,
+    /// Optional short description shown below the model name.
+    pub description: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]

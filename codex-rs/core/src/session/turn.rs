@@ -366,8 +366,14 @@ pub(crate) async fn run_turn(
 
     // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
     // one instance across retries within this turn.
-    let mut client_session =
-        prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    let turn_provider = turn_context.provider.info().clone();
+    let mut client_session = match prewarmed_client_session {
+        Some(client_session) if client_session.uses_provider(&turn_provider) => client_session,
+        _ => sess
+            .services
+            .model_client
+            .new_session_for_provider(turn_provider),
+    };
     // Pending input is drained into history before building the next model request.
     // However, we defer that drain until after sampling in two cases:
     // 1. At the start of a turn, so the fresh user prompt in `input` gets sampled first.

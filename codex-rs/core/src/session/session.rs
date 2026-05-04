@@ -1,5 +1,6 @@
 use super::*;
 use crate::goals::GoalRuntimeState;
+use codex_config::RequirementSource;
 use codex_otel::LEGACY_NOTIFY_CONFIGURED_METRIC;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSpecialPath;
@@ -183,6 +184,30 @@ impl SessionConfiguration {
         if let Some(personality) = updates.personality {
             next_configuration.personality = Some(personality);
         }
+        if let Some(model_provider_id) = updates.model_provider.clone() {
+            let model_provider = next_configuration
+                .original_config_do_not_use
+                .model_providers
+                .get(&model_provider_id)
+                .cloned()
+                .ok_or_else(|| crate::config::ConstraintError::InvalidValue {
+                    field_name: "model_provider",
+                    candidate: model_provider_id.clone(),
+                    allowed: format!(
+                        "{:?}",
+                        next_configuration
+                            .original_config_do_not_use
+                            .model_providers
+                            .keys()
+                            .collect::<Vec<_>>()
+                    ),
+                    requirement_source: RequirementSource::Unknown,
+                })?;
+            next_configuration.provider = model_provider.clone();
+            let original_config = Arc::make_mut(&mut next_configuration.original_config_do_not_use);
+            original_config.model_provider_id = model_provider_id;
+            original_config.model_provider = model_provider;
+        }
         if let Some(approval_policy) = updates.approval_policy {
             next_configuration.approval_policy.set(approval_policy)?;
         }
@@ -302,6 +327,7 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) permission_profile: Option<PermissionProfile>,
     pub(crate) active_permission_profile: Option<ActivePermissionProfile>,
     pub(crate) windows_sandbox_level: Option<WindowsSandboxLevel>,
+    pub(crate) model_provider: Option<String>,
     pub(crate) collaboration_mode: Option<CollaborationMode>,
     pub(crate) reasoning_summary: Option<ReasoningSummaryConfig>,
     pub(crate) service_tier: Option<Option<ServiceTier>>,

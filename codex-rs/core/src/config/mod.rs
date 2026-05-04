@@ -25,6 +25,7 @@ use codex_config::Sourced;
 use codex_config::ThreadConfigLoader;
 use codex_config::config_toml::ConfigLockfileToml;
 use codex_config::config_toml::ConfigToml;
+use codex_config::config_toml::CustomModelToml;
 use codex_config::config_toml::DEFAULT_PROJECT_DOC_MAX_BYTES;
 use codex_config::config_toml::ProjectConfig;
 use codex_config::config_toml::RealtimeAudioConfig;
@@ -593,6 +594,9 @@ pub struct Config {
     /// Combined provider map (defaults plus user-defined providers).
     pub model_providers: HashMap<String, ModelProviderInfo>,
 
+    /// User-pinned local OSS models that should appear in `/model`.
+    pub custom_models: Vec<CustomModel>,
+
     /// Maximum number of bytes to include from an AGENTS.md project doc file.
     pub project_doc_max_bytes: usize,
 
@@ -810,6 +814,16 @@ pub struct Config {
 
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
     pub otel: codex_config::types::OtelConfig,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CustomModel {
+    pub name: String,
+    pub model: String,
+    pub provider: String,
+    pub model_provider_id: String,
+    pub base_url: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1990,6 +2004,75 @@ pub(crate) fn resolve_web_search_mode_for_turn(
     WebSearchMode::Disabled
 }
 
+fn resolve_custom_models(
+    custom_models: Vec<CustomModelToml>,
+    model_providers: &mut HashMap<String, ModelProviderInfo>,
+) -> std::io::Result<Vec<CustomModel>> {
+    custom_models
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let model = entry.model.trim();
+            if model.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("custom_models[{index}].model cannot be empty"),
+                ));
+            }
+
+            let provider = entry.provider.trim();
+            codex_config::config_toml::validate_oss_provider(provider)?;
+            let base_url = entry
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            let model_provider_id = if let Some(base_url) = base_url.as_ref() {
+                let provider_info = model_providers.get(provider).cloned().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("custom_models[{index}].provider `{provider}` not found"),
+                    )
+                })?;
+                if provider_info
+                    .base_url
+                    .as_deref()
+                    .is_some_and(|provider_base_url| {
+                        provider_base_url.trim_end_matches('/') == base_url.trim_end_matches('/')
+                    })
+                {
+                    provider.to_string()
+                } else {
+                    let mut provider_info = provider_info;
+                    provider_info.base_url = Some(base_url.clone());
+                    let id = format!("custom-model-{index}-{provider}");
+                    model_providers.insert(id.clone(), provider_info);
+                    id
+                }
+            } else {
+                provider.to_string()
+            };
+
+            let name = entry
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(model)
+                .to_string();
+            Ok(CustomModel {
+                name,
+                model: model.to_string(),
+                provider: provider.to_string(),
+                model_provider_id,
+                base_url,
+                description: entry.description,
+            })
+        })
+        .collect()
+}
+
 impl Config {
     #[cfg(test)]
     async fn load_from_base_config_with_overrides(
@@ -2498,9 +2581,10 @@ impl Config {
             .clone()
             .filter(|value| !value.is_empty());
 
-        let model_providers =
+        let mut model_providers =
             merge_configured_model_providers(built_in_model_providers(openai_base_url), cfg.model_providers)
                 .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+        let custom_models = resolve_custom_models(cfg.custom_models, &mut model_providers)?;
 
         let model_provider_id = model_provider
             .or(config_profile.model_provider)
@@ -2941,6 +3025,7 @@ impl Config {
             mcp_oauth_callback_port: cfg.mcp_oauth_callback_port,
             mcp_oauth_callback_url: cfg.mcp_oauth_callback_url.clone(),
             model_providers,
+            custom_models,
             project_doc_max_bytes: cfg.project_doc_max_bytes.unwrap_or(AGENTS_MD_MAX_BYTES),
             project_doc_fallback_filenames: cfg
                 .project_doc_fallback_filenames

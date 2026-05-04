@@ -6387,6 +6387,7 @@ impl CodexMessageProcessor {
             || params.sandbox_policy.is_some()
             || params.permissions.is_some()
             || params.model.is_some()
+            || params.model_provider.is_some()
             || params.service_tier.is_some()
             || params.effort.is_some()
             || params.summary.is_some()
@@ -6445,6 +6446,7 @@ impl CodexMessageProcessor {
                 (None, None)
             };
         let model = params.model;
+        let model_provider = params.model_provider;
         let effort = params.effort.map(Some);
         let summary = params.summary;
         let service_tier = params.service_tier;
@@ -6464,6 +6466,7 @@ impl CodexMessageProcessor {
                     active_permission_profile: active_permission_profile.clone(),
                     windows_sandbox_level: None,
                     model: model.clone(),
+                    model_provider: model_provider.clone(),
                     effort,
                     summary,
                     service_tier,
@@ -6489,6 +6492,7 @@ impl CodexMessageProcessor {
                 active_permission_profile,
                 windows_sandbox_level: None,
                 model,
+                model_provider,
                 effort,
                 summary,
                 service_tier,

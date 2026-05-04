@@ -8,7 +8,7 @@ reasonable to merge newer upstream versions from time to time.
 
 ## What is different from upstream
 
-Codex Army currently adds two fork-specific features:
+Codex Army currently adds three fork-specific features:
 
 ### 1. Automatic account failover with `codex-accounts`
 
@@ -60,6 +60,12 @@ What `/autoprompt` does:
 
 This is meant to reduce the common problem where the agent leaves work half-done
 and exits too early.
+
+### 3. Custom local models in `/model`
+
+Codex Army can show user-defined local OSS models in the TUI `/model` picker.
+Add `[[custom_models]]` entries to `~/.codex/config.toml` and point them at
+LM Studio or Ollama. See [docs/custom-models.md](docs/custom-models.md).
 
 ## Install
 

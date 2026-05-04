@@ -709,6 +709,18 @@ impl App {
             AppEvent::UpdateModel(model) => {
                 self.chat_widget.set_model(&model);
             }
+            AppEvent::UpdateModelProvider(model_provider) => {
+                if let Some(provider) = self.config.model_providers.get(&model_provider).cloned() {
+                    self.config.model_provider_id = model_provider.clone();
+                    self.config.model_provider = provider.clone();
+                    self.chat_widget
+                        .set_model_provider(model_provider, provider);
+                } else {
+                    self.chat_widget.add_error_message(format!(
+                        "Model provider `{model_provider}` is not configured"
+                    ));
+                }
+            }
             AppEvent::UpdateCollaborationMode(mask) => {
                 self.chat_widget.set_collaboration_mask(mask);
             }
@@ -1136,20 +1148,33 @@ impl App {
                     let _ = (preset, mode);
                 }
             }
-            AppEvent::PersistModelSelection { model, effort } => {
+            AppEvent::PersistModelSelection {
+                model,
+                effort,
+                model_provider,
+            } => {
                 let profile = self.active_profile.as_deref();
-                match ConfigEditsBuilder::new(&self.config.codex_home)
+                let mut edits = ConfigEditsBuilder::new(&self.config.codex_home)
                     .with_profile(profile)
-                    .set_model(Some(model.as_str()), effort)
-                    .apply()
-                    .await
-                {
+                    .set_model(Some(model.as_str()), effort);
+                if let Some(model_provider) = model_provider.as_deref() {
+                    edits = edits.set_model_provider(Some(model_provider));
+                }
+                match edits.apply().await {
                     Ok(()) => {
                         let effort_label = effort
                             .map(|selected_effort| selected_effort.to_string())
                             .unwrap_or_else(|| "default".to_string());
-                        tracing::info!("Selected model: {model}, Selected effort: {effort_label}");
+                        tracing::info!(
+                            "Selected model: {model}, Selected effort: {effort_label}, Selected provider: {:?}",
+                            model_provider
+                        );
                         let mut message = format!("Model changed to {model}");
+                        if let Some(model_provider) = model_provider.as_deref() {
+                            message.push_str(" via ");
+                            message.push_str(model_provider);
+                            self.chat_widget.submit_op(AppCommand::reload_user_config());
+                        }
                         if let Some(label) = Self::reasoning_label_for(&model, effort) {
                             message.push(' ');
                             message.push_str(label);

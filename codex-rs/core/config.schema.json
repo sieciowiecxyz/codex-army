@@ -693,6 +693,36 @@
       },
       "type": "object"
     },
+    "CustomModelToml": {
+      "additionalProperties": false,
+      "properties": {
+        "base_url": {
+          "description": "Optional provider base URL override for this entry.",
+          "type": "string"
+        },
+        "description": {
+          "description": "Optional short description shown below the model name.",
+          "type": "string"
+        },
+        "model": {
+          "description": "Model id sent to the local provider, for example `google/gemma-4-26b-a4b`.",
+          "type": "string"
+        },
+        "name": {
+          "description": "User-facing label shown in `/model`. Defaults to `model`.",
+          "type": "string"
+        },
+        "provider": {
+          "description": "Local provider id. Initially `lmstudio` or `ollama`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "provider"
+      ],
+      "type": "object"
+    },
     "DebugConfigLockToml": {
       "additionalProperties": false,
       "properties": {
@@ -3752,6 +3782,14 @@
     "compact_prompt": {
       "description": "Compact prompt used for history compaction.",
       "type": "string"
+    },
+    "custom_models": {
+      "default": [],
+      "description": "User-pinned local OSS models shown in the TUI `/model` picker.",
+      "items": {
+        "$ref": "#/definitions/CustomModelToml"
+      },
+      "type": "array"
     },
     "debug": {
       "allOf": [

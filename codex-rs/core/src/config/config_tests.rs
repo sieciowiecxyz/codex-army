@@ -11,6 +11,7 @@ use codex_config::config_toml::AgentRoleToml;
 use codex_config::config_toml::AgentsToml;
 use codex_config::config_toml::AutoReviewToml;
 use codex_config::config_toml::ConfigToml;
+use codex_config::config_toml::CustomModelToml;
 use codex_config::config_toml::ProjectConfig;
 use codex_config::config_toml::RealtimeAudioConfig;
 use codex_config::config_toml::RealtimeConfig;
@@ -203,6 +204,40 @@ async fn load_config_loads_global_agents_instructions() -> std::io::Result<()> {
     assert_eq!(
         config.user_instructions.as_deref(),
         Some("global instructions")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_registers_custom_local_model() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            custom_models: vec![CustomModelToml {
+                name: Some("Gemma Local".to_string()),
+                model: "google/gemma-4-26b-a4b".to_string(),
+                provider: "lmstudio".to_string(),
+                base_url: Some("http://localhost:1234/v1".to_string()),
+                description: Some("Local Gemma through LM Studio".to_string()),
+            }],
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    let custom_model = config.custom_models.first().expect("custom model");
+    assert_eq!(custom_model.name, "Gemma Local");
+    assert_eq!(custom_model.model, "google/gemma-4-26b-a4b");
+    assert_eq!(custom_model.provider, "lmstudio");
+    assert_eq!(custom_model.model_provider_id, "lmstudio");
+    assert_eq!(
+        config
+            .model_providers
+            .get("lmstudio")
+            .and_then(|provider| provider.base_url.as_deref()),
+        Some("http://localhost:1234/v1")
     );
     Ok(())
 }
@@ -6351,6 +6386,7 @@ async fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             service_tier: None,
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
+            custom_models: Vec::new(),
             permissions: Permissions {
                 approval_policy: Constrained::allow_any(AskForApproval::Never),
                 permission_profile: Constrained::allow_any(PermissionProfile::read_only()),
@@ -6553,6 +6589,7 @@ async fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         service_tier: None,
         model_provider_id: "openai-custom".to_string(),
         model_provider: fixture.openai_custom_provider.clone(),
+        custom_models: Vec::new(),
         permissions: Permissions {
             approval_policy: Constrained::allow_any(AskForApproval::UnlessTrusted),
             permission_profile: Constrained::allow_any(PermissionProfile::read_only()),
@@ -6709,6 +6746,7 @@ async fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         service_tier: None,
         model_provider_id: "openai".to_string(),
         model_provider: fixture.openai_provider.clone(),
+        custom_models: Vec::new(),
         permissions: Permissions {
             approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
             permission_profile: Constrained::allow_any(PermissionProfile::read_only()),
@@ -6850,6 +6888,7 @@ async fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         service_tier: None,
         model_provider_id: "openai".to_string(),
         model_provider: fixture.openai_provider.clone(),
+        custom_models: Vec::new(),
         permissions: Permissions {
             approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
             permission_profile: Constrained::allow_any(PermissionProfile::read_only()),

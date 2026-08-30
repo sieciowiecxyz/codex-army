@@ -3,34 +3,38 @@ name: Codex Army CI
 on:
   pull_request:
   push:
-    branches: ['**']
-    tags: ['army-v*']
+    branches:
+      - main
+    tags:
+      - army-v*
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: codex-army-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  CODEX_MANIFEST: codex-source/codex-rs/Cargo.toml
 
 jobs:
   checks:
     name: Checks
     runs-on: ubuntu-latest
     timeout-minutes: 240
-    defaults:
-      run:
-        working-directory: codex-rs
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install test runner
+      - name: Install test runner and Just
         run: cargo install --locked cargo-nextest just
-      - name: Check formatting
-        run: python3 ../scripts/format.py --check
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path "$CODEX_MANIFEST" --all -- --config imports_granularity=Item --check
       - name: Build test helper binaries
-        run: cargo build --locked -p codex-cli --bin codex -p codex-rmcp-client --bin test_stdio_server
+        run: cargo build --locked --manifest-path "$CODEX_MANIFEST" -p codex-cli --bin codex -p codex-rmcp-client --bin test_stdio_server
       - name: Run core tests
         run: just test -p codex-core
 
@@ -46,12 +50,11 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu
       - name: Build optimized binary
-        working-directory: codex-rs
-        run: cargo build --locked --profile release-army --target x86_64-unknown-linux-gnu -p codex-cli --bin codex
+        run: cargo build --locked --manifest-path "$CODEX_MANIFEST" --profile release-army --target x86_64-unknown-linux-gnu -p codex-cli --bin codex
       - name: Stage release files
         run: |
           mkdir -p dist
-          cp codex-rs/target/x86_64-unknown-linux-gnu/release-army/codex dist/codex
+          cp codex-source/codex-rs/target/x86_64-unknown-linux-gnu/release-army/codex dist/codex
           cp LICENSE dist/LICENSE
           sha256sum dist/codex > dist/codex.sha256
       - uses: actions/upload-artifact@v4

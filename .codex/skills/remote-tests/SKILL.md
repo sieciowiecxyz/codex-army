@@ -60,7 +60,7 @@ bash -c '
   source scripts/test-remote-env.sh
   trap codex_remote_env_cleanup EXIT
 
-  cd codex-rs
+  cd codex-source/codex-rs
   just test -p codex-core --test all
 '
 ```
@@ -74,7 +74,7 @@ bash -c '
   source scripts/test-remote-env.sh
   trap codex_remote_env_cleanup EXIT
 
-  cd codex-rs
+  cd codex-source/codex-rs
   just test -p codex-app-server --test all
 '
 ```

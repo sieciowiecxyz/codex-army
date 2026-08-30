@@ -1,0 +1,1344 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index c99c54a871..902aaeface 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -580,6 +580,7 @@ codegen-units = 4
+ # unchanged so upstream build and packaging assumptions remain intact.
+ [profile.release-army]
+ inherits = "release"
++opt-level = 3
+ lto = "fat"
+ codegen-units = 1
+ debug = 0
+diff --git a/app-server/src/lib.rs b/app-server/src/lib.rs
+index fcf9ecff1b..f3447f6a6c 100644
+--- a/app-server/src/lib.rs
++++ b/app-server/src/lib.rs
+@@ -1334,11 +1334,12 @@ fn test_user_config_file_from_env() -> Option<std::path::PathBuf> {
+     None
+ }
+
++#[cfg(debug_assertions)]
+ fn loader_overrides_with_test_user_config_file(
+-    mut loader_overrides: LoaderOverrides,
++    loader_overrides: LoaderOverrides,
+     test_user_config_file: Option<std::path::PathBuf>,
+ ) -> IoResult<LoaderOverrides> {
+-    #[cfg(debug_assertions)]
++    let mut loader_overrides = loader_overrides;
+     if let Some(path) = test_user_config_file {
+         let path = AbsolutePathBuf::from_absolute_path(path).map_err(|err| {
+             std::io::Error::new(
+@@ -1353,9 +1354,14 @@ fn loader_overrides_with_test_user_config_file(
+         loader_overrides.user_config_path = Some(path);
+     }
+
+-    #[cfg(not(debug_assertions))]
+-    let _ = test_user_config_file;
++    Ok(loader_overrides)
++}
+
++#[cfg(not(debug_assertions))]
++fn loader_overrides_with_test_user_config_file(
++    loader_overrides: LoaderOverrides,
++    _test_user_config_file: Option<std::path::PathBuf>,
++) -> IoResult<LoaderOverrides> {
+     Ok(loader_overrides)
+ }
+
+diff --git a/app-server/tests/suite/v2/account_switch_failover.rs b/app-server/tests/suite/v2/account_switch_failover.rs
+new file mode 100644
+index 0000000000..cb357d3cbc
+--- /dev/null
++++ b/app-server/tests/suite/v2/account_switch_failover.rs
+@@ -0,0 +1,170 @@
++use anyhow::Result;
++use app_test_support::ChatGptAuthFixture;
++use app_test_support::MockResponsesConfig;
++use app_test_support::TestAppServer;
++use app_test_support::create_mock_responses_server_sequence_unchecked;
++use app_test_support::write_chatgpt_auth;
++use codex_app_server_protocol::ThreadGoalSetResponse;
++use codex_app_server_protocol::ThreadStartParams;
++use codex_app_server_protocol::TurnStartParams;
++use codex_app_server_protocol::UserInput;
++use codex_app_server_protocol::WarningNotification;
++use codex_config::types::AuthCredentialsStoreMode;
++use codex_features::Feature;
++use core_test_support::responses;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++use std::os::unix::fs::PermissionsExt;
++use std::path::Path;
++use std::path::PathBuf;
++use std::time::Duration;
++use tempfile::TempDir;
++use tokio::time::timeout;
++
++const READ_TIMEOUT: Duration = Duration::from_secs(10);
++
++fn shell_quote(path: &Path) -> String {
++    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
++}
++
++fn install_mock_codex_accounts(home: &Path) -> Result<PathBuf> {
++    let bin_dir = home.join("mock-bin");
++    std::fs::create_dir_all(&bin_dir)?;
++    let command = bin_dir.join("codex-accounts");
++    std::fs::write(
++        &command,
++        format!(
++            "#!/bin/sh\ncp {source} {destination}\nprintf 'switched\\n'\n",
++            source = shell_quote(&home.join("account-b/auth.json")),
++            destination = shell_quote(&home.join("auth.json")),
++        ),
++    )?;
++    std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755))?;
++    Ok(command)
++}
++
++#[tokio::test]
++async fn goal_continuation_switches_accounts_and_keeps_running() -> Result<()> {
++    let server = create_mock_responses_server_sequence_unchecked(vec![
++        responses::sse(vec![
++            responses::ev_response_created("materialize-thread"),
++            responses::ev_completed("materialize-thread"),
++        ]),
++        responses::sse(vec![
++            responses::ev_response_created("limited-response"),
++            json!({
++                "type": "response.failed",
++                "response": {
++                    "id": "limited-response",
++                    "error": {
++                        "code": "insufficient_quota",
++                        "message": "You exceeded your current quota."
++                    }
++                }
++            }),
++        ]),
++        responses::sse(vec![
++            responses::ev_response_created("continued-response"),
++            responses::ev_completed_with_tokens("continued-response", 200),
++        ]),
++    ])
++    .await;
++
++    let home = TempDir::new()?;
++    MockResponsesConfig::new(&server.uri())
++        .enable_feature(Feature::Goals)
++        .write(home.path())?;
++    write_chatgpt_auth(
++        home.path(),
++        ChatGptAuthFixture::new("account-a-token").account_id("account-a"),
++        AuthCredentialsStoreMode::File,
++    )?;
++    write_chatgpt_auth(
++        &home.path().join("account-b"),
++        ChatGptAuthFixture::new("account-b-token").account_id("account-b"),
++        AuthCredentialsStoreMode::File,
++    )?;
++    let command = install_mock_codex_accounts(home.path())?;
++    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
++    let path = format!(
++        "{}:{}",
++        command
++            .parent()
++            .expect("mock command should have a parent")
++            .to_string_lossy(),
++        inherited_path.to_string_lossy()
++    );
++
++    let mut app = TestAppServer::builder()
++        .with_codex_home(home.path())
++        .with_env_overrides(&[("PATH", Some(path.as_str()))])
++        .build_initialized()
++        .await?;
++    let thread = app.start_thread(ThreadStartParams::default()).await?.thread;
++
++    app.start_turn_and_wait_for_completion(TurnStartParams {
++        thread_id: thread.id.clone(),
++        input: vec![UserInput::Text {
++            text: "materialize this thread".to_string(),
++            text_elements: Vec::new(),
++        }],
++        ..Default::default()
++    })
++    .await?;
++
++    let goal_request = app
++        .send_raw_request(
++            "thread/goal/set",
++            Some(json!({
++                "threadId": thread.id,
++                "objective": "finish after the account switch",
++                "tokenBudget": 100,
++            })),
++        )
++        .await?;
++    let _: ThreadGoalSetResponse = timeout(READ_TIMEOUT, app.read_response(goal_request)).await??;
++    timeout(
++        READ_TIMEOUT,
++        app.read_stream_until_notification_message("thread/goal/updated"),
++    )
++    .await??;
++
++    let warning = app
++        .read_stream_until_matching_notification("account switch warning", |notification| {
++            notification.method == "warning"
++                && notification.params.as_ref().is_some_and(|params| {
++                    params["message"]
++                        .as_str()
++                        .is_some_and(|message| message.starts_with("Changing account:"))
++                })
++        })
++        .await?;
++    let warning: WarningNotification = serde_json::from_value(
++        warning
++            .params
++            .expect("account switch warning should include parameters"),
++    )?;
++    assert_eq!(
++        warning.message,
++        "Changing account: account-a → account-b. Continuing previous task…"
++    );
++
++    timeout(
++        READ_TIMEOUT,
++        app.read_stream_until_notification_message("turn/completed"),
++    )
++    .await??;
++
++    let requests = server
++        .received_requests()
++        .await
++        .expect("mock server should record requests");
++    assert_eq!(
++        requests
++            .iter()
++            .filter(|request| request.url.path().ends_with("/responses"))
++            .count(),
++        3
++    );
++    Ok(())
++}
+diff --git a/app-server/tests/suite/v2/mod.rs b/app-server/tests/suite/v2/mod.rs
+index 7ea4813a71..b14363ff59 100644
+--- a/app-server/tests/suite/v2/mod.rs
++++ b/app-server/tests/suite/v2/mod.rs
+@@ -1,4 +1,6 @@
+ mod account;
++#[cfg(unix)]
++mod account_switch_failover;
+ mod account_thread_usage;
+ mod analytics;
+ mod app_installed;
+diff --git a/cloud-tasks/src/lib.rs b/cloud-tasks/src/lib.rs
+index fa3fde91f0..bc330d5f89 100644
+--- a/cloud-tasks/src/lib.rs
++++ b/cloud-tasks/src/lib.rs
+@@ -13,7 +13,9 @@ use codex_cloud_tasks_client::TaskStatus;
+ use codex_git_utils::current_branch_name;
+ use codex_git_utils::default_branch_name;
+ use codex_http_client::ClientRouteClass;
++#[cfg(debug_assertions)]
+ use codex_http_client::HttpClientFactory;
++#[cfg(debug_assertions)]
+ use codex_http_client::OutboundProxyPolicy;
+ use codex_http_client::RouteAwareClientPool;
+ use codex_login::default_client::get_codex_user_agent;
+diff --git a/core/src/client.rs b/core/src/client.rs
+index ca7772350c..7d69283ece 100644
+--- a/core/src/client.rs
++++ b/core/src/client.rs
+@@ -569,12 +569,10 @@ impl ModelClient {
+         let Some(auth_manager) = self.auth_manager() else {
+             return AccountSwitchResult::Failed;
+         };
+-        let Some(auth_before) = auth_manager.auth().await else {
+-            return AccountSwitchResult::Failed;
+-        };
+-        let Some(account_before) = auth_before.get_account_id() else {
+-            return AccountSwitchResult::Failed;
+-        };
++        let account_before = auth_manager
++            .auth()
++            .await
++            .and_then(|auth| auth.get_account_id());
+
+         let output = match Command::new(account_switch_command())
+             .arg("use-best")
+@@ -611,13 +609,13 @@ impl ModelClient {
+         let Some(account_after) = auth_after.get_account_id() else {
+             return AccountSwitchResult::Failed;
+         };
+-        if account_before == account_after {
++        if account_before.as_deref() == Some(account_after.as_str()) {
+             return AccountSwitchResult::Unavailable { retry_after };
+         }
+
+         self.store_cached_websocket_session(WebsocketSession::default());
+         AccountSwitchResult::Switched {
+-            from: account_before,
++            from: account_before.unwrap_or_else(|| "not-connected".to_string()),
+             to: account_after,
+         }
+     }
+@@ -1874,10 +1872,14 @@ impl ModelClientSession {
+             {
+                 Ok(_) => {}
+                 Err(ApiError::Transport(TransportError::Http { status, .. }))
+-                    if status == StatusCode::UPGRADE_REQUIRED =>
++                    if status == StatusCode::UPGRADE_REQUIRED
++                        || status == StatusCode::NOT_FOUND =>
+                 {
+                     return Ok(WebsocketStreamOutcome::FallbackToHttp);
+                 }
++                Err(ApiError::Transport(TransportError::Timeout | TransportError::Network(_))) => {
++                    return Ok(WebsocketStreamOutcome::FallbackToHttp);
++                }
+                 Err(ApiError::Transport(unauthorized_transport))
+                     if provider.is_recoverable_auth_error(&unauthorized_transport) =>
+                 {
+diff --git a/core/src/context_manager/history_tests.rs b/core/src/context_manager/history_tests.rs
+index cdf5b3da97..95b83520d9 100644
+--- a/core/src/context_manager/history_tests.rs
++++ b/core/src/context_manager/history_tests.rs
+@@ -1637,7 +1637,6 @@ fn format_exec_output_prefers_line_marker_when_both_limits_exceeded() {
+     assert_truncated_message_matches(&truncated, "line-0-", /*expected_removed*/ 17_423);
+ }
+
+-#[cfg(not(debug_assertions))]
+ #[test]
+ fn normalize_adds_missing_output_for_function_call() {
+     let items = vec![ResponseItem::FunctionCall {
+@@ -1677,7 +1676,6 @@ fn normalize_adds_missing_output_for_function_call() {
+     );
+ }
+
+-#[cfg(not(debug_assertions))]
+ #[test]
+ fn normalize_adds_missing_output_for_custom_tool_call() {
+     let items = vec![ResponseItem::CustomToolCall {
+@@ -1716,7 +1714,78 @@ fn normalize_adds_missing_output_for_custom_tool_call() {
+     );
+ }
+
+-#[cfg(not(debug_assertions))]
++#[test]
++fn normalize_missing_custom_outputs_is_idempotent_and_stable() {
++    let items = vec![
++        ResponseItem::CustomToolCall {
++            id: Some(ResponseItemId::with_suffix("ctc", "first")),
++            status: None,
++            call_id: "tool-first".to_string(),
++            name: "first".to_string(),
++            namespace: None,
++            input: "{}".to_string(),
++            internal_chat_message_metadata_passthrough: None,
++        },
++        user_msg("between calls"),
++        ResponseItem::CustomToolCall {
++            id: Some(ResponseItemId::with_suffix("ctc", "second")),
++            status: None,
++            call_id: "tool-second".to_string(),
++            name: "second".to_string(),
++            namespace: None,
++            input: "{}".to_string(),
++            internal_chat_message_metadata_passthrough: None,
++        },
++    ];
++    let mut history = create_history_with_items(items);
++
++    history.normalize_history(&default_input_modalities());
++    let first = raw_items(&history);
++    history.normalize_history(&default_input_modalities());
++
++    assert_eq!(raw_items(&history), first);
++    let outputs = first
++        .iter()
++        .filter_map(|item| match item {
++            ResponseItem::CustomToolCallOutput {
++                id,
++                call_id,
++                output,
++                ..
++            } => Some((id, call_id, output)),
++            _ => None,
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(outputs.len(), 2);
++    assert_eq!(outputs[0].1, "tool-first");
++    assert_eq!(outputs[1].1, "tool-second");
++    assert!(outputs.iter().all(|(id, _, output)| {
++        id.as_ref().is_some_and(|id| id.starts_with("ctco_"))
++            && **output == FunctionCallOutputPayload::from_text("aborted".to_string())
++    }));
++}
++
++#[test]
++fn normalize_preserves_existing_custom_tool_output() {
++    let items = vec![
++        ResponseItem::CustomToolCall {
++            id: Some(ResponseItemId::with_suffix("ctc", "existing")),
++            status: None,
++            call_id: "tool-existing".to_string(),
++            name: "custom".to_string(),
++            namespace: None,
++            input: "{}".to_string(),
++            internal_chat_message_metadata_passthrough: None,
++        },
++        custom_tool_call_output("tool-existing", "completed"),
++    ];
++    let mut history = create_history_with_items(items.clone());
++
++    history.normalize_history(&default_input_modalities());
++
++    assert_eq!(raw_items(&history), items);
++}
++
+ #[test]
+ fn normalize_adds_missing_output_for_local_shell_call_with_id() {
+     let items = vec![ResponseItem::LocalShellCall {
+@@ -1799,7 +1868,6 @@ fn normalize_removes_orphan_custom_tool_call_output() {
+     assert_eq!(raw_items(&h), vec![]);
+ }
+
+-#[cfg(not(debug_assertions))]
+ #[test]
+ fn normalize_mixed_inserts_and_removals() {
+     let items = vec![
+@@ -1813,15 +1881,6 @@ fn normalize_mixed_inserts_and_removals() {
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
+         },
+-        // Orphan output that should be removed
+-        ResponseItem::FunctionCallOutput {
+-            id: None,
+-            call_id: Some("c2".to_string()),
+-            name: None,
+-            namespace: None,
+-            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+-            internal_chat_message_metadata_passthrough: None,
+-        },
+         // Will get an inserted custom tool output
+         ResponseItem::CustomToolCall {
+             id: None,
+@@ -2045,75 +2104,6 @@ fn normalize_adds_missing_output_for_tool_search_call() {
+     );
+ }
+
+-#[cfg(debug_assertions)]
+-#[test]
+-#[should_panic]
+-fn normalize_adds_missing_output_for_custom_tool_call_panics_in_debug() {
+-    let items = vec![ResponseItem::CustomToolCall {
+-        id: None,
+-        status: None,
+-        call_id: "tool-x".to_string(),
+-        name: "custom".to_string(),
+-        namespace: None,
+-        input: "{}".to_string(),
+-        internal_chat_message_metadata_passthrough: None,
+-    }];
+-    let mut h = create_history_with_items(items);
+-    h.normalize_history(&default_input_modalities());
+-}
+-
+-#[cfg(debug_assertions)]
+-#[test]
+-#[should_panic]
+-fn normalize_adds_missing_output_for_local_shell_call_with_id_panics_in_debug() {
+-    let items = vec![ResponseItem::LocalShellCall {
+-        id: None,
+-        call_id: Some("shell-1".to_string()),
+-        status: LocalShellStatus::Completed,
+-        action: LocalShellAction::Exec(LocalShellExecAction {
+-            command: vec!["echo".to_string(), "hi".to_string()],
+-            timeout_ms: None,
+-            working_directory: None,
+-            env: None,
+-            user: None,
+-        }),
+-        internal_chat_message_metadata_passthrough: None,
+-    }];
+-    let mut h = create_history_with_items(items);
+-    h.normalize_history(&default_input_modalities());
+-}
+-
+-#[cfg(debug_assertions)]
+-#[test]
+-#[should_panic]
+-fn normalize_removes_orphan_function_call_output_panics_in_debug() {
+-    let items = vec![ResponseItem::FunctionCallOutput {
+-        id: None,
+-        call_id: Some("orphan-1".to_string()),
+-        name: None,
+-        namespace: None,
+-        output: FunctionCallOutputPayload::from_text("ok".to_string()),
+-        internal_chat_message_metadata_passthrough: None,
+-    }];
+-    let mut h = create_history_with_items(items);
+-    h.normalize_history(&default_input_modalities());
+-}
+-
+-#[cfg(debug_assertions)]
+-#[test]
+-#[should_panic]
+-fn normalize_removes_orphan_custom_tool_call_output_panics_in_debug() {
+-    let items = vec![ResponseItem::CustomToolCallOutput {
+-        id: None,
+-        call_id: "orphan-2".to_string(),
+-        name: None,
+-        output: FunctionCallOutputPayload::from_text("ok".to_string()),
+-        internal_chat_message_metadata_passthrough: None,
+-    }];
+-    let mut h = create_history_with_items(items);
+-    h.normalize_history(&default_input_modalities());
+-}
+-
+ #[cfg(not(debug_assertions))]
+ #[test]
+ fn normalize_removes_orphan_client_tool_search_output() {
+@@ -2132,22 +2122,6 @@ fn normalize_removes_orphan_client_tool_search_output() {
+     assert_eq!(raw_items(&h), vec![]);
+ }
+
+-#[cfg(debug_assertions)]
+-#[test]
+-#[should_panic]
+-fn normalize_removes_orphan_client_tool_search_output_panics_in_debug() {
+-    let items = vec![ResponseItem::ToolSearchOutput {
+-        id: None,
+-        call_id: Some("orphan-search".to_string()),
+-        status: "completed".to_string(),
+-        execution: "client".to_string(),
+-        tools: Vec::new(),
+-        internal_chat_message_metadata_passthrough: None,
+-    }];
+-    let mut h = create_history_with_items(items);
+-    h.normalize_history(&default_input_modalities());
+-}
+-
+ #[test]
+ fn normalize_keeps_server_tool_search_output_without_matching_call() {
+     let items = vec![ResponseItem::ToolSearchOutput {
+diff --git a/core/src/context_manager/normalize.rs b/core/src/context_manager/normalize.rs
+index 7fc45ba217..c5030b3f62 100644
+--- a/core/src/context_manager/normalize.rs
++++ b/core/src/context_manager/normalize.rs
+@@ -14,6 +14,7 @@ use crate::context::ContextualUserFragment;
+ use crate::context::UnsupportedMedia;
+ use crate::util::error_or_panic;
+ use tracing::info;
++use tracing::warn;
+
+ // Changing this value would change model-visible IDs and invalidate prompt caches.
+ const SYNTHETIC_OUTPUT_ID_NAMESPACE: Uuid = Uuid::from_u128(0x90d38d3e_6a5b_4d52_bfe2_2f1e634bfac4);
+@@ -87,9 +88,10 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
+             ResponseItem::CustomToolCall { id, call_id, .. }
+                 if !custom_tool_output_ids.contains(call_id.as_str()) =>
+             {
+-                error_or_panic(format!(
++                warn!(
++                    call_id = %call_id,
+                     "Custom tool call output is missing for call id: {call_id}"
+-                ));
++                );
+                 missing_outputs_to_insert.push((
+                     idx,
+                     ResponseItemEnvelope::new(ResponseItem::CustomToolCallOutput {
+@@ -107,9 +109,10 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
+                 call_id: Some(call_id),
+                 ..
+             } if !function_output_ids.contains(call_id.as_str()) => {
+-                error_or_panic(format!(
++                warn!(
++                    call_id = %call_id,
+                     "Local shell call output is missing for call id: {call_id}"
+-                ));
++                );
+                 missing_outputs_to_insert.push((
+                     idx,
+                     ResponseItemEnvelope::new(ResponseItem::FunctionCallOutput {
+diff --git a/core/src/tools/code_mode/mod.rs b/core/src/tools/code_mode/mod.rs
+index 1465766a82..a0f855e249 100644
+--- a/core/src/tools/code_mode/mod.rs
++++ b/core/src/tools/code_mode/mod.rs
+@@ -3,10 +3,16 @@ mod execute_handler;
+ pub(crate) mod execute_spec;
+ mod response_adapter;
+ mod telemetry;
++mod wait_backoff;
++#[cfg(test)]
++#[path = "wait_backoff_service_tests.rs"]
++mod wait_backoff_service_tests;
+ mod wait_handler;
+ pub(crate) mod wait_spec;
+
++use std::collections::HashMap;
+ use std::sync::Arc;
++use std::sync::Mutex;
+ use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::Ordering;
+ use std::time::Duration;
+@@ -49,6 +55,7 @@ use delegate::CodeModeDispatchBroker;
+ use delegate::CodeModeDispatchWorker;
+ pub(crate) use execute_handler::CodeModeExecuteHandler;
+ use response_adapter::into_function_call_output_content_items;
++use wait_backoff::WaitBackoff;
+ pub(crate) use wait_handler::CodeModeWaitHandler;
+
+ pub(crate) const PUBLIC_TOOL_NAME: &str = codex_code_mode::PUBLIC_TOOL_NAME;
+@@ -74,6 +81,7 @@ pub(crate) struct CodeModeService {
+     default_exec_yield_time_ms: u64,
+     shutdown_token: CancellationToken,
+     unavailable_warning_emitted: AtomicBool,
++    wait_backoffs: Mutex<HashMap<CellId, WaitBackoff>>,
+ }
+
+ impl CodeModeService {
+@@ -92,6 +100,7 @@ impl CodeModeService {
+             default_exec_yield_time_ms: config.default_exec_yield_time_ms,
+             shutdown_token: CancellationToken::new(),
+             unavailable_warning_emitted: AtomicBool::new(false),
++            wait_backoffs: Mutex::new(HashMap::new()),
+         }
+     }
+
+@@ -126,21 +135,144 @@ impl CodeModeService {
+         request
+             .yield_time_ms
+             .get_or_insert(self.default_exec_yield_time_ms);
+-        self.session().await?.execute(request).await
++        let started_cell = self.session().await?.execute(request).await?;
++        self.wait_backoffs
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .insert(started_cell.cell_id.clone(), WaitBackoff::new());
++        Ok(started_cell)
+     }
+
+     pub(crate) async fn wait(
+         &self,
+         request: codex_code_mode::WaitRequest,
+     ) -> Result<codex_code_mode::WaitOutcome, String> {
+-        self.session().await?.wait(request).await
++        // Ignore model-selected polling intervals. The runtime owns the
++        // schedule so repeated waits do not create an uncontrolled model loop.
++        let session = self.session().await?;
++        let cell_id = request.cell_id.clone();
++
++        loop {
++            let next_yield_time_ms = {
++                let mut wait_backoffs = self
++                    .wait_backoffs
++                    .lock()
++                    .unwrap_or_else(std::sync::PoisonError::into_inner);
++                let wait_backoff = wait_backoffs
++                    .entry(cell_id.clone())
++                    .or_insert_with(WaitBackoff::new);
++                wait_backoff.next_yield_time_ms()
++            };
++
++            let outcome = session
++                .wait(codex_code_mode::WaitRequest {
++                    cell_id: cell_id.clone(),
++                    yield_time_ms: next_yield_time_ms,
++                })
++                .await?;
++            let mut wait_backoffs = self
++                .wait_backoffs
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            let wait_backoff = wait_backoffs
++                .entry(cell_id.clone())
++                .or_insert_with(WaitBackoff::new);
++            match outcome {
++                codex_code_mode::WaitOutcome::LiveCell(
++                    codex_code_mode::RuntimeResponse::Yielded {
++                        cell_id: _,
++                        content_items,
++                    },
++                ) if !content_items.is_empty() => {
++                    wait_backoff.record_activity(content_items);
++                }
++                codex_code_mode::WaitOutcome::LiveCell(
++                    codex_code_mode::RuntimeResponse::Yielded { cell_id: _, .. },
++                ) if next_yield_time_ms < wait_backoff::MAX_BACKOFF_MS => {
++                    wait_backoff.record_empty_yield();
++                }
++                codex_code_mode::WaitOutcome::LiveCell(
++                    codex_code_mode::RuntimeResponse::Yielded { cell_id, .. },
++                ) => {
++                    let content_items = wait_backoff.take_content_items(
++                        Vec::new(),
++                        Some(
++                            "Task is still running; no new output was produced during the last 10 minutes. Continue waiting, inspect the task, or terminate it.",
++                        ),
++                    );
++                    return Ok(codex_code_mode::WaitOutcome::LiveCell(
++                        codex_code_mode::RuntimeResponse::Yielded {
++                            cell_id,
++                            content_items,
++                        },
++                    ));
++                }
++                codex_code_mode::WaitOutcome::LiveCell(response) => {
++                    let response = match response {
++                        codex_code_mode::RuntimeResponse::Terminated {
++                            cell_id,
++                            content_items,
++                        } => codex_code_mode::RuntimeResponse::Terminated {
++                            cell_id,
++                            content_items: wait_backoff.take_content_items(content_items, None),
++                        },
++                        codex_code_mode::RuntimeResponse::Result {
++                            cell_id,
++                            content_items,
++                            error_text,
++                        } => codex_code_mode::RuntimeResponse::Result {
++                            cell_id,
++                            content_items: wait_backoff.take_content_items(content_items, None),
++                            error_text,
++                        },
++                        codex_code_mode::RuntimeResponse::Yielded { .. } => unreachable!(),
++                    };
++                    wait_backoffs.remove(&cell_id);
++                    return Ok(codex_code_mode::WaitOutcome::LiveCell(response));
++                }
++                codex_code_mode::WaitOutcome::MissingCell(response) => {
++                    let response = match response {
++                        codex_code_mode::RuntimeResponse::Terminated {
++                            cell_id,
++                            content_items,
++                        } => codex_code_mode::RuntimeResponse::Terminated {
++                            cell_id,
++                            content_items: wait_backoff.take_content_items(content_items, None),
++                        },
++                        codex_code_mode::RuntimeResponse::Result {
++                            cell_id,
++                            content_items,
++                            error_text,
++                        } => codex_code_mode::RuntimeResponse::Result {
++                            cell_id,
++                            content_items: wait_backoff.take_content_items(content_items, None),
++                            error_text,
++                        },
++                        codex_code_mode::RuntimeResponse::Yielded {
++                            cell_id,
++                            content_items,
++                        } => codex_code_mode::RuntimeResponse::Yielded {
++                            cell_id,
++                            content_items: wait_backoff.take_content_items(content_items, None),
++                        },
++                    };
++                    wait_backoffs.remove(&cell_id);
++                    return Ok(codex_code_mode::WaitOutcome::MissingCell(response));
++                }
++            }
++        }
+     }
+
+     pub(crate) async fn terminate(
+         &self,
+         cell_id: CellId,
+     ) -> Result<codex_code_mode::WaitOutcome, String> {
+-        self.session().await?.terminate(cell_id).await
++        let outcome = self.session().await?.terminate(cell_id.clone()).await;
++        self.wait_backoffs
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .remove(&cell_id);
++        outcome
+     }
+
+     pub(crate) async fn interrupt_active_cells(&self) {
+@@ -195,6 +328,10 @@ impl CodeModeService {
+
+     pub(crate) fn finish_cell_dispatch(&self, cell_id: &CellId) {
+         self.dispatch_broker.close_cell(cell_id);
++        self.wait_backoffs
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .remove(cell_id);
+     }
+
+     pub(crate) fn start_turn_worker(
+diff --git a/core/src/tools/code_mode/wait_backoff.rs b/core/src/tools/code_mode/wait_backoff.rs
+new file mode 100644
+index 0000000000..92a843ca3f
+--- /dev/null
++++ b/core/src/tools/code_mode/wait_backoff.rs
+@@ -0,0 +1,90 @@
++use codex_code_mode::FunctionCallOutputContentItem;
++
++pub(super) const INITIAL_BACKOFF_MS: u64 = 30_000;
++pub(super) const MAX_BACKOFF_MS: u64 = 600_000;
++const MAX_BUFFERED_OUTPUT_BYTES: usize = 256 * 1024;
++const MAX_BUFFERED_OUTPUT_ITEMS: usize = 256;
++const OUTPUT_TRUNCATED_MESSAGE: &str =
++    "Some intermediate task output was omitted because it exceeded the local buffer limit.";
++
++/// Tracks the next observation interval for one code-mode cell.
++pub(super) struct WaitBackoff {
++    next_yield_time_ms: u64,
++    buffered_content_items: Vec<FunctionCallOutputContentItem>,
++    buffered_output_bytes: usize,
++    buffered_output_truncated: bool,
++}
++
++impl WaitBackoff {
++    pub(super) fn new() -> Self {
++        Self {
++            next_yield_time_ms: INITIAL_BACKOFF_MS,
++            buffered_content_items: Vec::new(),
++            buffered_output_bytes: 0,
++            buffered_output_truncated: false,
++        }
++    }
++
++    pub(super) fn next_yield_time_ms(&self) -> u64 {
++        self.next_yield_time_ms
++    }
++
++    pub(super) fn record_empty_yield(&mut self) {
++        self.next_yield_time_ms = self
++            .next_yield_time_ms
++            .saturating_mul(2)
++            .min(MAX_BACKOFF_MS);
++    }
++
++    pub(super) fn record_activity(&mut self, content_items: Vec<FunctionCallOutputContentItem>) {
++        self.next_yield_time_ms = INITIAL_BACKOFF_MS;
++        for content_item in content_items {
++            let item_bytes = content_item_bytes(&content_item);
++            if self.buffered_content_items.len() >= MAX_BUFFERED_OUTPUT_ITEMS
++                || self.buffered_output_bytes.saturating_add(item_bytes) > MAX_BUFFERED_OUTPUT_BYTES
++            {
++                self.buffered_output_truncated = true;
++                continue;
++            }
++            self.buffered_output_bytes = self.buffered_output_bytes.saturating_add(item_bytes);
++            self.buffered_content_items.push(content_item);
++        }
++    }
++
++    pub(super) fn take_content_items(
++        &mut self,
++        current: Vec<FunctionCallOutputContentItem>,
++        idle_message: Option<&str>,
++    ) -> Vec<FunctionCallOutputContentItem> {
++        let mut content_items = std::mem::take(&mut self.buffered_content_items);
++        content_items.extend(current);
++        if self.buffered_output_truncated {
++            content_items.push(FunctionCallOutputContentItem::InputText {
++                text: OUTPUT_TRUNCATED_MESSAGE.to_string(),
++            });
++        }
++        if let Some(idle_message) = idle_message {
++            content_items.push(FunctionCallOutputContentItem::InputText {
++                text: idle_message.to_string(),
++            });
++        }
++        self.buffered_output_bytes = 0;
++        self.buffered_output_truncated = false;
++        content_items
++    }
++}
++
++fn content_item_bytes(content_item: &FunctionCallOutputContentItem) -> usize {
++    match content_item {
++        FunctionCallOutputContentItem::InputText { text }
++        | FunctionCallOutputContentItem::InputImage {
++            image_url: text,
++            detail: _,
++        }
++        | FunctionCallOutputContentItem::InputAudio { audio_url: text } => text.len(),
++    }
++}
++
++#[cfg(test)]
++#[path = "wait_backoff_tests.rs"]
++mod tests;
+diff --git a/core/src/tools/code_mode/wait_backoff_service_tests.rs b/core/src/tools/code_mode/wait_backoff_service_tests.rs
+new file mode 100644
+index 0000000000..fc1a5c5ae0
+--- /dev/null
++++ b/core/src/tools/code_mode/wait_backoff_service_tests.rs
+@@ -0,0 +1,208 @@
++use super::CodeModeService;
++use codex_code_mode::CodeModeSession;
++use codex_code_mode::CodeModeSessionDelegate;
++use codex_code_mode::CodeModeSessionProvider;
++use codex_code_mode::CodeModeSessionProviderFuture;
++use codex_code_mode::CodeModeSessionResultFuture;
++use codex_code_mode::ExecuteRequest;
++use codex_code_mode::RuntimeResponse;
++use codex_code_mode::StartedCell;
++use codex_code_mode::WaitOutcome;
++use codex_code_mode::WaitRequest;
++use std::collections::VecDeque;
++use std::sync::Arc;
++use tokio::sync::Mutex;
++
++struct RecordingSession {
++    outcomes: Mutex<VecDeque<WaitOutcome>>,
++    requests: Mutex<Vec<WaitRequest>>,
++}
++
++impl RecordingSession {
++    fn new(outcomes: impl IntoIterator<Item = WaitOutcome>) -> Self {
++        Self {
++            outcomes: Mutex::new(outcomes.into_iter().collect()),
++            requests: Mutex::new(Vec::new()),
++        }
++    }
++}
++
++impl CodeModeSession for RecordingSession {
++    fn execute<'a>(
++        &'a self,
++        _request: ExecuteRequest,
++    ) -> CodeModeSessionResultFuture<'a, StartedCell> {
++        Box::pin(async { Err("execute is not used by this test".to_string()) })
++    }
++
++    fn wait<'a>(&'a self, request: WaitRequest) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
++        Box::pin(async move {
++            self.requests.lock().await.push(request);
++            self.outcomes
++                .lock()
++                .await
++                .pop_front()
++                .ok_or_else(|| "test session ran out of outcomes".to_string())
++        })
++    }
++
++    fn terminate<'a>(
++        &'a self,
++        cell_id: codex_code_mode::CellId,
++    ) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
++        Box::pin(async move {
++            Ok(WaitOutcome::LiveCell(RuntimeResponse::Terminated {
++                cell_id,
++                content_items: Vec::new(),
++            }))
++        })
++    }
++
++    fn shutdown<'a>(&'a self) -> CodeModeSessionResultFuture<'a, ()> {
++        Box::pin(async { Ok(()) })
++    }
++}
++
++struct RecordingProvider {
++    session: Arc<RecordingSession>,
++}
++
++impl CodeModeSessionProvider for RecordingProvider {
++    fn create_session<'a>(
++        &'a self,
++        _delegate: Arc<dyn CodeModeSessionDelegate>,
++    ) -> CodeModeSessionProviderFuture<'a> {
++        let session = Arc::clone(&self.session);
++        Box::pin(async move { Ok(session as Arc<dyn CodeModeSession>) })
++    }
++}
++
++fn empty_yield(cell_id: &codex_code_mode::CellId) -> WaitOutcome {
++    WaitOutcome::LiveCell(RuntimeResponse::Yielded {
++        cell_id: cell_id.clone(),
++        content_items: Vec::new(),
++    })
++}
++
++fn service_with_outcomes(
++    outcomes: impl IntoIterator<Item = WaitOutcome>,
++) -> (CodeModeService, Arc<RecordingSession>) {
++    let session = Arc::new(RecordingSession::new(outcomes));
++    let service = CodeModeService::new(
++        Arc::new(RecordingProvider {
++            session: Arc::clone(&session),
++        }),
++        &Default::default(),
++        None,
++    );
++    (service, session)
++}
++
++#[tokio::test]
++async fn empty_waits_use_the_fixed_adaptive_schedule_and_return_after_ten_minutes() {
++    let cell_id = codex_code_mode::CellId::new("cell-1".to_string());
++    let (service, session) = service_with_outcomes([
++        empty_yield(&cell_id),
++        empty_yield(&cell_id),
++        empty_yield(&cell_id),
++        empty_yield(&cell_id),
++        empty_yield(&cell_id),
++        empty_yield(&cell_id),
++        WaitOutcome::LiveCell(RuntimeResponse::Result {
++            cell_id: cell_id.clone(),
++            content_items: vec![codex_code_mode::FunctionCallOutputContentItem::InputText {
++                text: "done".to_string(),
++            }],
++            error_text: None,
++        }),
++    ]);
++
++    let idle_outcome = service
++        .wait(WaitRequest {
++            cell_id: cell_id.clone(),
++            yield_time_ms: 1,
++        })
++        .await
++        .unwrap();
++
++    assert!(matches!(
++        idle_outcome,
++        WaitOutcome::LiveCell(RuntimeResponse::Yielded { .. })
++    ));
++    let resumed_outcome = service
++        .wait(WaitRequest {
++            cell_id,
++            yield_time_ms: 999_999,
++        })
++        .await
++        .unwrap();
++    assert!(matches!(
++        resumed_outcome,
++        WaitOutcome::LiveCell(RuntimeResponse::Result { .. })
++    ));
++    assert_eq!(
++        session
++            .requests
++            .lock()
++            .await
++            .iter()
++            .map(|request| request.yield_time_ms)
++            .collect::<Vec<_>>(),
++        vec![30_000, 60_000, 120_000, 240_000, 480_000, 600_000, 600_000]
++    );
++}
++
++#[tokio::test]
++async fn output_is_buffered_while_the_runtime_keeps_waiting() {
++    let cell_id = codex_code_mode::CellId::new("cell-2".to_string());
++    let (service, session) = service_with_outcomes([
++        WaitOutcome::LiveCell(RuntimeResponse::Yielded {
++            cell_id: cell_id.clone(),
++            content_items: vec![codex_code_mode::FunctionCallOutputContentItem::InputText {
++                text: "progress".to_string(),
++            }],
++        }),
++        empty_yield(&cell_id),
++        WaitOutcome::LiveCell(RuntimeResponse::Result {
++            cell_id: cell_id.clone(),
++            content_items: vec![codex_code_mode::FunctionCallOutputContentItem::InputText {
++                text: "done".to_string(),
++            }],
++            error_text: None,
++        }),
++    ]);
++
++    let outcome = service
++        .wait(WaitRequest {
++            cell_id,
++            yield_time_ms: 1,
++        })
++        .await
++        .unwrap();
++
++    assert_eq!(
++        outcome,
++        WaitOutcome::LiveCell(RuntimeResponse::Result {
++            cell_id: codex_code_mode::CellId::new("cell-2".to_string()),
++            content_items: vec![
++                codex_code_mode::FunctionCallOutputContentItem::InputText {
++                    text: "progress".to_string(),
++                },
++                codex_code_mode::FunctionCallOutputContentItem::InputText {
++                    text: "done".to_string(),
++                },
++            ],
++            error_text: None,
++        })
++    );
++    assert_eq!(
++        session
++            .requests
++            .lock()
++            .await
++            .iter()
++            .map(|request| request.yield_time_ms)
++            .collect::<Vec<_>>(),
++        vec![30_000, 30_000, 60_000]
++    );
++}
+diff --git a/core/src/tools/code_mode/wait_backoff_tests.rs b/core/src/tools/code_mode/wait_backoff_tests.rs
+new file mode 100644
+index 0000000000..6fa09208ec
+--- /dev/null
++++ b/core/src/tools/code_mode/wait_backoff_tests.rs
+@@ -0,0 +1,66 @@
++use super::INITIAL_BACKOFF_MS;
++use super::MAX_BACKOFF_MS;
++use super::WaitBackoff;
++use codex_code_mode::FunctionCallOutputContentItem;
++use pretty_assertions::assert_eq;
++
++#[test]
++fn wait_backoff_doubles_until_the_ten_minute_ceiling() {
++    let mut backoff = WaitBackoff::new();
++    let mut observed = Vec::new();
++
++    for _ in 0..10 {
++        let next = backoff.next_yield_time_ms();
++        observed.push(next);
++        backoff.record_empty_yield();
++    }
++
++    assert_eq!(
++        observed,
++        vec![
++            INITIAL_BACKOFF_MS,
++            60_000,
++            120_000,
++            240_000,
++            480_000,
++            MAX_BACKOFF_MS,
++            MAX_BACKOFF_MS,
++            MAX_BACKOFF_MS,
++            MAX_BACKOFF_MS,
++            MAX_BACKOFF_MS,
++        ]
++    );
++}
++
++#[test]
++fn activity_resets_the_schedule_and_buffers_output() {
++    let mut backoff = WaitBackoff::new();
++    backoff.record_empty_yield();
++    backoff.record_activity(vec![FunctionCallOutputContentItem::InputText {
++        text: "progress".to_string(),
++    }]);
++
++    assert_eq!(backoff.next_yield_time_ms(), INITIAL_BACKOFF_MS);
++    assert_eq!(
++        backoff.take_content_items(Vec::new(), None),
++        vec![FunctionCallOutputContentItem::InputText {
++            text: "progress".to_string(),
++        }]
++    );
++}
++
++#[test]
++fn idle_cycle_includes_a_model_visible_message() {
++    let mut backoff = WaitBackoff::new();
++    for _ in 0..5 {
++        backoff.record_empty_yield();
++    }
++
++    assert_eq!(
++        backoff.take_content_items(Vec::new(), Some("still running")),
++        vec![FunctionCallOutputContentItem::InputText {
++            text: "still running".to_string(),
++        }]
++    );
++    assert_eq!(backoff.next_yield_time_ms(), MAX_BACKOFF_MS);
++}
+diff --git a/core/tests/suite/account_switch_failover.rs b/core/tests/suite/account_switch_failover.rs
+new file mode 100644
+index 0000000000..768125a8c0
+--- /dev/null
++++ b/core/tests/suite/account_switch_failover.rs
+@@ -0,0 +1,164 @@
++use anyhow::Result;
++use codex_core::ModelClient;
++use codex_core::TurnInputRequest;
++use codex_login::CodexAuth;
++use codex_protocol::protocol::EventMsg;
++use core_test_support::responses::ev_assistant_message;
++use core_test_support::responses::ev_response_created;
++use core_test_support::responses::mount_sse_sequence;
++use core_test_support::responses::sse;
++use core_test_support::responses::start_mock_server;
++use core_test_support::skip_if_no_network;
++use core_test_support::test_codex::test_codex;
++use core_test_support::wait_for_event;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++use serial_test::serial;
++use std::os::unix::fs::PermissionsExt;
++use std::path::Path;
++use std::path::PathBuf;
++use std::sync::Arc;
++use tempfile::TempDir;
++
++struct AccountSwitchCommandGuard;
++
++impl Drop for AccountSwitchCommandGuard {
++    fn drop(&mut self) {
++        ModelClient::set_account_switch_command_for_tests(None);
++    }
++}
++
++fn shell_quote(path: &Path) -> String {
++    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
++}
++
++fn write_chatgpt_auth(home: &Path, account_id: &str) -> Result<()> {
++    std::fs::write(
++        home.join("account-b.json"),
++        serde_json::to_string_pretty(&json!({
++            "auth_mode": "chatgpt",
++            "tokens": {
++                "id_token": "a.e30.a",
++                "access_token": "dummy-access-token",
++                "refresh_token": "dummy-refresh-token",
++                "account_id": account_id,
++            }
++        }))?,
++    )?;
++    Ok(())
++}
++
++fn install_mock_codex_accounts(home: &Path) -> Result<PathBuf> {
++    let bin_dir = home.join("mock-bin");
++    std::fs::create_dir_all(&bin_dir)?;
++    let command = bin_dir.join("codex-accounts");
++    std::fs::write(
++        &command,
++        format!(
++            "#!/bin/sh\ntouch {invoked}\ncp {source} {destination}\nprintf 'switched\\n'\n",
++            invoked = shell_quote(&home.join("switch-invoked")),
++            source = shell_quote(&home.join("account-b.json")),
++            destination = shell_quote(&home.join("auth.json")),
++        ),
++    )?;
++    std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755))?;
++    Ok(command)
++}
++
++async fn run_turn_with_mock_switch(auth: CodexAuth, expected_from: &str) -> Result<()> {
++    skip_if_no_network!(Ok(()));
++
++    let server = start_mock_server().await;
++    let home = Arc::new(TempDir::new()?);
++    write_chatgpt_auth(home.path(), "account-b")?;
++    let command = install_mock_codex_accounts(home.path())?;
++    ModelClient::set_account_switch_command_for_tests(Some(command.clone().into_os_string()));
++    let _command_guard = AccountSwitchCommandGuard;
++
++    let response_mock = mount_sse_sequence(
++        &server,
++        vec![
++            sse(vec![
++                ev_response_created("limited-response"),
++                json!({
++                    "type": "response.failed",
++                    "response": {
++                        "id": "limited-response",
++                        "error": {
++                            "code": "insufficient_quota",
++                            "message": "You exceeded your current quota."
++                        }
++                    }
++                }),
++            ]),
++            sse(vec![
++                ev_response_created("continued-response"),
++                ev_assistant_message("continued-message", "continued"),
++                json!({
++                    "type": "response.completed",
++                    "response": {"id": "continued-response"}
++                }),
++            ]),
++        ],
++    )
++    .await;
++
++    let test = test_codex()
++        .with_home(home)
++        .with_auth(auth)
++        .build(&server)
++        .await?;
++    test.codex
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![
++            codex_protocol::user_input::UserInput::Text {
++                text: "continue after quota".to_string(),
++                text_elements: Vec::new(),
++            },
++        ]))
++        .await?;
++
++    let mut warning = None;
++    let mut error = None;
++    loop {
++        match wait_for_event(&test.codex, |_| true).await {
++            EventMsg::Warning(event) => warning = Some(event.message),
++            EventMsg::Error(event) => error = Some(event),
++            EventMsg::TurnComplete(_) => break,
++            _ => {}
++        }
++    }
++
++    assert!(
++        test.codex_home_path().join("switch-invoked").exists(),
++        "mock codex-accounts was not invoked; error: {error:?}"
++    );
++    assert_eq!(
++        response_mock.requests().len(),
++        2,
++        "account switch did not retry"
++    );
++    assert!(
++        error.is_none(),
++        "account switch test emitted an error: {error:?}"
++    );
++    let expected_warning =
++        format!("Changing account: {expected_from} → account-b. Continuing previous task…");
++    assert_eq!(warning.as_deref(), Some(expected_warning.as_str()));
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[serial(account_switch_command)]
++async fn ordinary_conversation_switches_from_one_dummy_account_to_another() -> Result<()> {
++    run_turn_with_mock_switch(
++        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
++        "account_id",
++    )
++    .await
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[serial(account_switch_command)]
++async fn ordinary_conversation_switches_when_no_account_is_connected() -> Result<()> {
++    run_turn_with_mock_switch(CodexAuth::from_api_key("dummy-api-key"), "not-connected").await
++}
+diff --git a/core/tests/suite/mod.rs b/core/tests/suite/mod.rs
+index 28cb2c6b46..3289fb1a16 100644
+--- a/core/tests/suite/mod.rs
++++ b/core/tests/suite/mod.rs
+@@ -35,6 +35,8 @@ pub static CODEX_ALIASES_TEMP_DIR: Option<TestBinaryDispatchGuard> = {
+
+ #[cfg(not(target_os = "windows"))]
+ mod abort_tasks;
++#[cfg(unix)]
++mod account_switch_failover;
+ mod additional_context;
+ mod agent_execution;
+ mod agent_websocket;
+diff --git a/core/tests/suite/openai_file_mcp.rs b/core/tests/suite/openai_file_mcp.rs
+index 9ae4b31214..c56891986b 100644
+--- a/core/tests/suite/openai_file_mcp.rs
++++ b/core/tests/suite/openai_file_mcp.rs
+@@ -44,7 +44,6 @@ use serde_json::json;
+ use wiremock::Mock;
+ use wiremock::MockServer;
+ use wiremock::ResponseTemplate;
+-use wiremock::matchers::body_json;
+ use wiremock::matchers::body_partial_json;
+ use wiremock::matchers::header;
+ use wiremock::matchers::method;

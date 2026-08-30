@@ -19,12 +19,28 @@
   workspace lives in `codex-source/codex-rs`; Army-owned patches, scripts,
   packaging, and CI live at the repository root. Keep this boundary stable so
   upstream updates remain easy to integrate.
+- Treat tracked files under `codex-source/` as a pristine upstream snapshot:
+  do not put Army behavior directly there and do not commit edits to that
+  tree. Store upstream behavior changes as ordered patches in
+  `patches/army/`.
+- `scripts/army-cargo.sh` creates a temporary patched source tree and runs
+  Cargo against it. Root commands and CI must use this wrapper, so local
+  builds/tests and release builds exercise exactly the patches that are
+  committed in the root. Updating upstream means refreshing the snapshot and
+  rebasing the Army patches, not mixing Army edits into `codex-source/`.
 - The fork keeps account-switch failover through the companion
   `codex-accounts` command and ships both `codex` and the adjacent
   `codex-code-mode-host`. Auto-prompt is intentionally not part of the fork.
 - Changes to upstream behavior should be minimal and isolated from the root
-  build/release plumbing. Prefer updating the root wrappers and CI when the
-  goal is Army-specific packaging or build behavior.
+  build/release plumbing. Prefer root wrappers and CI for Army-specific
+  packaging or build behavior, and add a source patch only when runtime code
+  must change.
+- Code-mode wait polling is runtime-owned: ignore the model's requested
+  `yield_time_ms` and use `30s -> 1m -> 2m -> 4m -> 8m -> 10m`, then `10m`
+  repeatedly. Empty observations stay inside the runtime until the 10-minute
+  checkpoint; then the model receives a bounded status/output message and may
+  continue, inspect, or terminate. Task output resets the next observation to
+  30 seconds and is buffered with a hard cap.
 
 In the codex-source/codex-rs folder where the Rust code lives:
 

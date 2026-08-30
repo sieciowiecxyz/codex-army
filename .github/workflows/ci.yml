@@ -19,7 +19,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  CODEX_MANIFEST: codex-source/codex-rs/Cargo.toml
 
 jobs:
   checks:
@@ -37,9 +36,9 @@ jobs:
       - name: Install test runner and Just
         run: cargo install --locked cargo-nextest just
       - name: Check Rust formatting
-        run: cargo fmt --manifest-path "$CODEX_MANIFEST" --all -- --config imports_granularity=Item --check
+        run: scripts/army-cargo.sh fmt --all -- --config imports_granularity=Item --check
       - name: Build test helper binaries
-        run: cargo build --locked --manifest-path "$CODEX_MANIFEST" -p codex-cli --bin codex -p codex-rmcp-client --bin test_stdio_server
+        run: scripts/army-cargo.sh build --locked -p codex-cli --bin codex -p codex-rmcp-client --bin test_stdio_server
       - name: Run core tests
         run: just test -p codex-core
       - name: Run account-switch integration tests
@@ -63,7 +62,7 @@ jobs:
         with:
           target: x86_64-unknown-linux-gnu
       - name: Build optimized binaries
-        run: cargo build --locked --manifest-path "$CODEX_MANIFEST" --profile release-army --target x86_64-unknown-linux-gnu -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host
+        run: scripts/army-cargo.sh build --locked --profile release-army --target x86_64-unknown-linux-gnu -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host
       - name: Stage release files
         run: |
           mkdir -p dist

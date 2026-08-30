@@ -3,9 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
-exec cargo build \
+exec "$repo_root/scripts/army-cargo.sh" build \
   --locked \
-  --manifest-path "$repo_root/codex-source/codex-rs/Cargo.toml" \
   --profile release-army \
   -p codex-cli \
   --bin codex \

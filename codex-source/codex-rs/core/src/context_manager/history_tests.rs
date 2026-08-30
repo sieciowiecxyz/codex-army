@@ -1637,6 +1637,7 @@ fn format_exec_output_prefers_line_marker_when_both_limits_exceeded() {
     assert_truncated_message_matches(&truncated, "line-0-", /*expected_removed*/ 17_423);
 }
 
+#[cfg(not(debug_assertions))]
 #[test]
 fn normalize_adds_missing_output_for_function_call() {
     let items = vec![ResponseItem::FunctionCall {
@@ -1676,6 +1677,7 @@ fn normalize_adds_missing_output_for_function_call() {
     );
 }
 
+#[cfg(not(debug_assertions))]
 #[test]
 fn normalize_adds_missing_output_for_custom_tool_call() {
     let items = vec![ResponseItem::CustomToolCall {
@@ -1714,78 +1716,7 @@ fn normalize_adds_missing_output_for_custom_tool_call() {
     );
 }
 
-#[test]
-fn normalize_missing_custom_outputs_is_idempotent_and_stable() {
-    let items = vec![
-        ResponseItem::CustomToolCall {
-            id: Some(ResponseItemId::with_suffix("ctc", "first")),
-            status: None,
-            call_id: "tool-first".to_string(),
-            name: "first".to_string(),
-            namespace: None,
-            input: "{}".to_string(),
-            internal_chat_message_metadata_passthrough: None,
-        },
-        user_msg("between calls"),
-        ResponseItem::CustomToolCall {
-            id: Some(ResponseItemId::with_suffix("ctc", "second")),
-            status: None,
-            call_id: "tool-second".to_string(),
-            name: "second".to_string(),
-            namespace: None,
-            input: "{}".to_string(),
-            internal_chat_message_metadata_passthrough: None,
-        },
-    ];
-    let mut history = create_history_with_items(items);
-
-    history.normalize_history(&default_input_modalities());
-    let first = raw_items(&history);
-    history.normalize_history(&default_input_modalities());
-
-    assert_eq!(raw_items(&history), first);
-    let outputs = first
-        .iter()
-        .filter_map(|item| match item {
-            ResponseItem::CustomToolCallOutput {
-                id,
-                call_id,
-                output,
-                ..
-            } => Some((id, call_id, output)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(outputs.len(), 2);
-    assert_eq!(outputs[0].1, "tool-first");
-    assert_eq!(outputs[1].1, "tool-second");
-    assert!(outputs.iter().all(|(id, _, output)| {
-        id.as_ref().is_some_and(|id| id.starts_with("ctco_"))
-            && **output == FunctionCallOutputPayload::from_text("aborted".to_string())
-    }));
-}
-
-#[test]
-fn normalize_preserves_existing_custom_tool_output() {
-    let items = vec![
-        ResponseItem::CustomToolCall {
-            id: Some(ResponseItemId::with_suffix("ctc", "existing")),
-            status: None,
-            call_id: "tool-existing".to_string(),
-            name: "custom".to_string(),
-            namespace: None,
-            input: "{}".to_string(),
-            internal_chat_message_metadata_passthrough: None,
-        },
-        custom_tool_call_output("tool-existing", "completed"),
-    ];
-    let mut history = create_history_with_items(items.clone());
-
-    history.normalize_history(&default_input_modalities());
-
-    assert_eq!(raw_items(&history), items);
-}
-
+#[cfg(not(debug_assertions))]
 #[test]
 fn normalize_adds_missing_output_for_local_shell_call_with_id() {
     let items = vec![ResponseItem::LocalShellCall {
@@ -1868,6 +1799,7 @@ fn normalize_removes_orphan_custom_tool_call_output() {
     assert_eq!(raw_items(&h), vec![]);
 }
 
+#[cfg(not(debug_assertions))]
 #[test]
 fn normalize_mixed_inserts_and_removals() {
     let items = vec![
@@ -1879,6 +1811,15 @@ fn normalize_mixed_inserts_and_removals() {
             arguments: "{}".to_string(),
             call_id: "c1".to_string(),
             encrypted_function_args: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        // Orphan output that should be removed
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("c2".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
             internal_chat_message_metadata_passthrough: None,
         },
         // Will get an inserted custom tool output
@@ -2104,6 +2045,75 @@ fn normalize_adds_missing_output_for_tool_search_call() {
     );
 }
 
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic]
+fn normalize_adds_missing_output_for_custom_tool_call_panics_in_debug() {
+    let items = vec![ResponseItem::CustomToolCall {
+        id: None,
+        status: None,
+        call_id: "tool-x".to_string(),
+        name: "custom".to_string(),
+        namespace: None,
+        input: "{}".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    }];
+    let mut h = create_history_with_items(items);
+    h.normalize_history(&default_input_modalities());
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic]
+fn normalize_adds_missing_output_for_local_shell_call_with_id_panics_in_debug() {
+    let items = vec![ResponseItem::LocalShellCall {
+        id: None,
+        call_id: Some("shell-1".to_string()),
+        status: LocalShellStatus::Completed,
+        action: LocalShellAction::Exec(LocalShellExecAction {
+            command: vec!["echo".to_string(), "hi".to_string()],
+            timeout_ms: None,
+            working_directory: None,
+            env: None,
+            user: None,
+        }),
+        internal_chat_message_metadata_passthrough: None,
+    }];
+    let mut h = create_history_with_items(items);
+    h.normalize_history(&default_input_modalities());
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic]
+fn normalize_removes_orphan_function_call_output_panics_in_debug() {
+    let items = vec![ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: Some("orphan-1".to_string()),
+        name: None,
+        namespace: None,
+        output: FunctionCallOutputPayload::from_text("ok".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    }];
+    let mut h = create_history_with_items(items);
+    h.normalize_history(&default_input_modalities());
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic]
+fn normalize_removes_orphan_custom_tool_call_output_panics_in_debug() {
+    let items = vec![ResponseItem::CustomToolCallOutput {
+        id: None,
+        call_id: "orphan-2".to_string(),
+        name: None,
+        output: FunctionCallOutputPayload::from_text("ok".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    }];
+    let mut h = create_history_with_items(items);
+    h.normalize_history(&default_input_modalities());
+}
+
 #[cfg(not(debug_assertions))]
 #[test]
 fn normalize_removes_orphan_client_tool_search_output() {
@@ -2120,6 +2130,22 @@ fn normalize_removes_orphan_client_tool_search_output() {
     h.normalize_history(&default_input_modalities());
 
     assert_eq!(raw_items(&h), vec![]);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic]
+fn normalize_removes_orphan_client_tool_search_output_panics_in_debug() {
+    let items = vec![ResponseItem::ToolSearchOutput {
+        id: None,
+        call_id: Some("orphan-search".to_string()),
+        status: "completed".to_string(),
+        execution: "client".to_string(),
+        tools: Vec::new(),
+        internal_chat_message_metadata_passthrough: None,
+    }];
+    let mut h = create_history_with_items(items);
+    h.normalize_history(&default_input_modalities());
 }
 
 #[test]

@@ -3,7 +3,7 @@ name: Codex Army CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: ['**']
     tags: ['army-v*']
   workflow_dispatch:
 

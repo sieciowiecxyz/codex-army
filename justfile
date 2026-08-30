@@ -2,6 +2,7 @@ set positional-arguments := true
 
 source_root := justfile_directory() / "codex-source"
 rust_root := source_root / "codex-rs"
+rusty_v8_script := justfile_directory() / "scripts" / "setup-rusty-v8.sh"
 rust_min_stack := "8388608"
 
 # Army owns this file. The upstream justfile lives in codex-source/.
@@ -25,7 +26,7 @@ fmt-check:
     cargo fmt --manifest-path {{ rust_root }}/Cargo.toml --all -- --config imports_granularity=Item --check
 
 fix *args:
-    cargo clippy --manifest-path {{ rust_root }}/Cargo.toml --fix --tests --allow-dirty {args}
+    cargo clippy --manifest-path {{ rust_root }}/Cargo.toml --fix --tests --allow-dirty {{args}}
 
 clippy *args:
     cargo clippy --manifest-path {{ rust_root }}/Cargo.toml --tests {args}
@@ -35,13 +36,14 @@ install:
     cargo fetch --locked --manifest-path {{ rust_root }}/Cargo.toml
 
 build-army:
-    cargo build --locked --manifest-path {{ rust_root }}/Cargo.toml --profile release-army -p codex-cli --bin codex
+    RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` cargo build --locked --manifest-path {{ rust_root }}/Cargo.toml --profile release-army -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host
 
 install-army:
-    cargo install --path {{ rust_root }}/cli --locked --force --profile release-army --bin codex
+    RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` cargo install --path {{ rust_root }}/cli --locked --force --profile release-army --bin codex
+    RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` cargo install --path {{ rust_root }}/code-mode-host --locked --force --profile release-army --bin codex-code-mode-host
 
 build-army-debug:
-    cargo build --locked --manifest-path {{ rust_root }}/Cargo.toml -p codex-cli --bin codex
+    RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` cargo build --locked --manifest-path {{ rust_root }}/Cargo.toml -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host
 
 write-config-schema:
     cargo run --locked --manifest-path {{ rust_root }}/Cargo.toml -p codex-core --bin codex-write-config-schema

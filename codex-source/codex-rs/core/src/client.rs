@@ -569,12 +569,10 @@ impl ModelClient {
         let Some(auth_manager) = self.auth_manager() else {
             return AccountSwitchResult::Failed;
         };
-        let Some(auth_before) = auth_manager.auth().await else {
-            return AccountSwitchResult::Failed;
-        };
-        let Some(account_before) = auth_before.get_account_id() else {
-            return AccountSwitchResult::Failed;
-        };
+        let account_before = auth_manager
+            .auth()
+            .await
+            .and_then(|auth| auth.get_account_id());
 
         let output = match Command::new(account_switch_command())
             .arg("use-best")
@@ -611,13 +609,13 @@ impl ModelClient {
         let Some(account_after) = auth_after.get_account_id() else {
             return AccountSwitchResult::Failed;
         };
-        if account_before == account_after {
+        if account_before.as_deref() == Some(account_after.as_str()) {
             return AccountSwitchResult::Unavailable { retry_after };
         }
 
         self.store_cached_websocket_session(WebsocketSession::default());
         AccountSwitchResult::Switched {
-            from: account_before,
+            from: account_before.unwrap_or_else(|| "not-connected".to_string()),
             to: account_after,
         }
     }
@@ -1874,8 +1872,12 @@ impl ModelClientSession {
             {
                 Ok(_) => {}
                 Err(ApiError::Transport(TransportError::Http { status, .. }))
-                    if status == StatusCode::UPGRADE_REQUIRED =>
+                    if status == StatusCode::UPGRADE_REQUIRED
+                        || status == StatusCode::NOT_FOUND =>
                 {
+                    return Ok(WebsocketStreamOutcome::FallbackToHttp);
+                }
+                Err(ApiError::Transport(TransportError::Timeout | TransportError::Network(_))) => {
                     return Ok(WebsocketStreamOutcome::FallbackToHttp);
                 }
                 Err(ApiError::Transport(unauthorized_transport))

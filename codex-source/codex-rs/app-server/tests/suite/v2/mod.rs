@@ -1,4 +1,6 @@
 mod account;
+#[cfg(unix)]
+mod account_switch_failover;
 mod account_thread_usage;
 mod analytics;
 mod app_installed;

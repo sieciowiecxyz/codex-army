@@ -9,4 +9,6 @@ exec cargo build \
   --profile release-army \
   -p codex-cli \
   --bin codex \
+  -p codex-code-mode-host \
+  --bin codex-code-mode-host \
   "$@"

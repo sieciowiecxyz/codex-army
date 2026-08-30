@@ -580,6 +580,7 @@ codegen-units = 4
 # unchanged so upstream build and packaging assumptions remain intact.
 [profile.release-army]
 inherits = "release"
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 debug = 0

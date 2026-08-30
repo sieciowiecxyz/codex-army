@@ -7,12 +7,14 @@ url='https://github.com/sieciowiecxyz/codex-army'
 license=('Apache-2.0')
 depends=('glibc')
 conflicts=('codex')
-source=('codex' 'LICENSE')
+options=(!debug)
+source=('codex' 'codex-code-mode-host' 'LICENSE')
 # The release workflow replaces these values with the checksums of the staged
-# binary and license before running makepkg.
-sha256sums=('SKIP' 'SKIP')
+# binaries and license before running makepkg.
+sha256sums=('SKIP' 'SKIP' 'SKIP')
 
 package() {
   install -Dm755 "$srcdir/codex" "$pkgdir/usr/bin/codex"
+  install -Dm755 "$srcdir/codex-code-mode-host" "$pkgdir/usr/bin/codex-code-mode-host"
   install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

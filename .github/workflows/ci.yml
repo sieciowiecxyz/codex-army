@@ -37,9 +37,13 @@ jobs:
         run: cargo build --locked --manifest-path "$CODEX_MANIFEST" -p codex-cli --bin codex -p codex-rmcp-client --bin test_stdio_server
       - name: Run core tests
         run: just test -p codex-core
+      - name: Run account-switch integration tests
+        run: |
+          just test -p codex-core account_switch_failover
+          just test -p codex-app-server account_switch_failover
 
   build:
-    name: Build Linux release binary
+    name: Build Linux release binaries
     if: startsWith(github.ref, 'refs/tags/army-v')
     needs: checks
     runs-on: ubuntu-latest
@@ -49,14 +53,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
-      - name: Build optimized binary
-        run: cargo build --locked --manifest-path "$CODEX_MANIFEST" --profile release-army --target x86_64-unknown-linux-gnu -p codex-cli --bin codex
+      - name: Download Codex-built V8 prebuilt archive
+        uses: ./codex-source/.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+      - name: Build optimized binaries
+        run: cargo build --locked --manifest-path "$CODEX_MANIFEST" --profile release-army --target x86_64-unknown-linux-gnu -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host
       - name: Stage release files
         run: |
           mkdir -p dist
           cp codex-source/codex-rs/target/x86_64-unknown-linux-gnu/release-army/codex dist/codex
+          cp codex-source/codex-rs/target/x86_64-unknown-linux-gnu/release-army/codex-code-mode-host dist/codex-code-mode-host
           cp LICENSE dist/LICENSE
           sha256sum dist/codex > dist/codex.sha256
+          sha256sum dist/codex-code-mode-host > dist/codex-code-mode-host.sha256
+      - name: Sanity check staged binaries
+        run: bash scripts/health-check-army.sh dist/codex dist/codex-code-mode-host
       - uses: actions/upload-artifact@v4
         with:
           name: codex-linux-x86_64
@@ -84,6 +96,7 @@ jobs:
           spec_dir="${RUNNER_TEMP}/rpmbuild"
           mkdir -p "$spec_dir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
           cp dist/codex "$spec_dir/SOURCES/codex"
+          cp dist/codex-code-mode-host "$spec_dir/SOURCES/codex-code-mode-host"
           cp dist/LICENSE "$spec_dir/SOURCES/LICENSE"
           sed "s/^Version:.*/Version:        ${version}/" \
               packaging/fedora/codex-army.spec > "$spec_dir/SPECS/codex-army.spec"
@@ -91,20 +104,27 @@ jobs:
             --define "_topdir $spec_dir" --define "_rpmdir ${RUNNER_TEMP}/rpm-out"
           mkdir -p dist/packages
           find "${RUNNER_TEMP}/rpm-out" -name '*.rpm' -exec cp {} dist/packages/ \;
+      - name: Sanity check RPM contents
+        run: |
+          rpm_file="$(find dist/packages -name '*.rpm' ! -name '*.src.rpm' | head -n1)"
+          test -n "$rpm_file"
+          rpm -qpl "$rpm_file" | grep -qx '/usr/bin/codex'
+          rpm -qpl "$rpm_file" | grep -qx '/usr/bin/codex-code-mode-host'
       - name: Build Arch package
         run: |
           version="${GITHUB_REF_NAME#army-v}"
           package_dir="${RUNNER_TEMP}/arch-package"
           mkdir -p "$package_dir"
-          cp dist/codex dist/LICENSE packaging/arch/PKGBUILD "$package_dir/"
+          cp dist/codex dist/codex-code-mode-host dist/LICENSE packaging/arch/PKGBUILD "$package_dir/"
           sed -i "s/^pkgver=.*/pkgver=${version}/" "$package_dir/PKGBUILD"
           binary_sha256="$(sha256sum "$package_dir/codex" | cut -d' ' -f1)"
+          host_sha256="$(sha256sum "$package_dir/codex-code-mode-host" | cut -d' ' -f1)"
           license_sha256="$(sha256sum "$package_dir/LICENSE" | cut -d' ' -f1)"
-          sed -i "s/^sha256sums=.*/sha256sums=('${binary_sha256}' '${license_sha256}')/" "$package_dir/PKGBUILD"
+          sed -i "s/^sha256sums=.*/sha256sums=('${binary_sha256}' '${host_sha256}' '${license_sha256}')/" "$package_dir/PKGBUILD"
           docker run --rm \
             -v "$package_dir:/build" \
             archlinux:base-devel \
-            bash -c 'pacman -Sy --noconfirm archlinux-keyring && cd /build && makepkg --nodeps --noconfirm'
+            bash -c 'pacman -Sy --noconfirm archlinux-keyring && cd /build && makepkg --nodeps --noconfirm && pkg_file=$(find . -maxdepth 1 -type f -name "*.pkg.tar.zst" ! -name "*-debug-*" -print -quit) && test -n "$pkg_file" && bsdtar -tf "$pkg_file" | grep -qx usr/bin/codex && bsdtar -tf "$pkg_file" | grep -qx usr/bin/codex-code-mode-host'
           cp "$package_dir"/*.pkg.tar.zst dist/packages/
       - name: Add checksums
         run: sha256sum dist/packages/* > dist/packages/SHA256SUMS
@@ -134,4 +154,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/codex dist/codex.sha256 \
+            dist/codex-code-mode-host dist/codex-code-mode-host.sha256 \
             dist/packages/* --repo "$GITHUB_REPOSITORY" --generate-notes

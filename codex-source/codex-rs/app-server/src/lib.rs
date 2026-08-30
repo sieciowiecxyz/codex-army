@@ -1334,33 +1334,34 @@ fn test_user_config_file_from_env() -> Option<std::path::PathBuf> {
     None
 }
 
+#[cfg(debug_assertions)]
 fn loader_overrides_with_test_user_config_file(
     loader_overrides: LoaderOverrides,
     test_user_config_file: Option<std::path::PathBuf>,
 ) -> IoResult<LoaderOverrides> {
-    #[cfg(debug_assertions)]
-    {
-        let mut loader_overrides = loader_overrides;
-        if let Some(path) = test_user_config_file {
-            let path = AbsolutePathBuf::from_absolute_path(path).map_err(|err| {
-                std::io::Error::new(
-                    ErrorKind::InvalidInput,
-                    format!("invalid test user config path: {err}"),
-                )
-            })?;
-            warn!(
-                path = %path.as_path().display(),
-                "using debug-only app-server test user config file"
-            );
-            loader_overrides.user_config_path = Some(path);
-        }
-
-        return Ok(loader_overrides);
+    let mut loader_overrides = loader_overrides;
+    if let Some(path) = test_user_config_file {
+        let path = AbsolutePathBuf::from_absolute_path(path).map_err(|err| {
+            std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("invalid test user config path: {err}"),
+            )
+        })?;
+        warn!(
+            path = %path.as_path().display(),
+            "using debug-only app-server test user config file"
+        );
+        loader_overrides.user_config_path = Some(path);
     }
 
-    #[cfg(not(debug_assertions))]
-    let _ = test_user_config_file;
+    Ok(loader_overrides)
+}
 
+#[cfg(not(debug_assertions))]
+fn loader_overrides_with_test_user_config_file(
+    loader_overrides: LoaderOverrides,
+    _test_user_config_file: Option<std::path::PathBuf>,
+) -> IoResult<LoaderOverrides> {
     Ok(loader_overrides)
 }
 

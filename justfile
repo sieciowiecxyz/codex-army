@@ -35,15 +35,18 @@ install:
     rustup show active-toolchain
     cargo fetch --locked --manifest-path {{ rust_root }}/Cargo.toml
 
+# Fast local iteration build. GitHub Actions uses release-army explicitly below.
 build-army:
+    RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` cargo build --locked --manifest-path {{ rust_root }}/Cargo.toml -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host
+
+build-army-optimized:
     RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` cargo build --locked --manifest-path {{ rust_root }}/Cargo.toml --profile release-army -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host
 
 install-army:
     RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` cargo install --path {{ rust_root }}/cli --locked --force --profile release-army --bin codex
     RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` cargo install --path {{ rust_root }}/code-mode-host --locked --force --profile release-army --bin codex-code-mode-host
 
-build-army-debug:
-    RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` cargo build --locked --manifest-path {{ rust_root }}/Cargo.toml -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host
+build-army-debug: build-army
 
 write-config-schema:
     cargo run --locked --manifest-path {{ rust_root }}/Cargo.toml -p codex-core --bin codex-write-config-schema

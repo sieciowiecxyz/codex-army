@@ -1,5 +1,13 @@
 # Rust/codex-source/codex-rs
 
+## Codex Army build workflow
+
+- Keep `just build-army` as the fast local iteration build: use Cargo's default
+  unoptimized development profile for both Army binaries.
+- Keep `just build-army-optimized` and GitHub Actions on the `release-army`
+  profile with the full optimization/LTO settings. CI and release artifacts
+  must never silently switch to the fast local profile.
+
 In the codex-source/codex-rs folder where the Rust code lives:
 
 - Crate names are prefixed with `codex-`. For example, the `core` folder's crate is named `codex-core`

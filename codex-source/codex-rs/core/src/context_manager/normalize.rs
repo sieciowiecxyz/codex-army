@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::context::ContextualUserFragment;
 use crate::context::UnsupportedMedia;
+use crate::util::error_or_panic;
 use tracing::info;
 use tracing::warn;
 
@@ -187,19 +188,17 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {
                 call_id: Some(call_id),
                 ..
             } if !function_call_ids.contains(call_id.as_str()) => {
-                warn!(
-                    call_id = %call_id,
+                error_or_panic(format!(
                     "Orphan function call output for call id: {call_id}"
-                );
+                ));
                 orphan_positions.push(position);
             }
             ResponseItem::CustomToolCallOutput { call_id, .. }
                 if !custom_tool_call_ids.contains(call_id.as_str()) =>
             {
-                warn!(
-                    call_id = %call_id,
+                error_or_panic(format!(
                     "Orphan custom tool call output for call id: {call_id}"
-                );
+                ));
                 orphan_positions.push(position);
             }
             ResponseItem::ToolSearchOutput {
@@ -207,10 +206,7 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {
                 execution,
                 ..
             } if execution != "server" && !tool_search_call_ids.contains(call_id.as_str()) => {
-                warn!(
-                    call_id = %call_id,
-                    "Orphan tool search output for call id: {call_id}"
-                );
+                error_or_panic(format!("Orphan tool search output for call id: {call_id}"));
                 orphan_positions.push(position);
             }
             _ => {}

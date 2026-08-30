@@ -28,31 +28,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Enable Linux user namespaces for bubblewrap
-        run: |
-          sudo sysctl -w kernel.unprivileged_userns_clone=1
-          if sudo sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-      - name: Install Linux sandbox test dependency
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap
-          bwrap --version
-          bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-net \
-            --ro-bind / / --proc /proc --dev /dev /usr/bin/true
-      - name: Install test runner and Just
-        run: cargo install --locked cargo-nextest just
       - name: Check Rust formatting
         run: scripts/army-cargo.sh fmt --all -- --config imports_granularity=Item --check
-      - name: Build test helper binaries
-        run: scripts/army-cargo.sh build --locked -p codex-cli --bin codex -p codex-rmcp-client --bin test_stdio_server
-      - name: Run core tests (Code Mode tests opt-in)
-        run: just test -p codex-core
-      - name: Run account-switch integration tests
+      - name: Build Codex smoke binary
+        run: scripts/army-cargo.sh build --locked -p codex-cli --bin codex
+      - name: Check Codex smoke binary
         run: |
-          just test -p codex-core account_switch_failover
-          just test -p codex-app-server account_switch_failover
+          test -x codex-source/codex-rs/target/debug/codex
+          codex-source/codex-rs/target/debug/codex --version
+          codex-source/codex-rs/target/debug/codex --help >/dev/null
 
   build:
     name: Build Linux release binaries

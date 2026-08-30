@@ -3,10 +3,16 @@ mod execute_handler;
 pub(crate) mod execute_spec;
 mod response_adapter;
 mod telemetry;
+mod wait_backoff;
+#[cfg(test)]
+#[path = "wait_backoff_service_tests.rs"]
+mod wait_backoff_service_tests;
 mod wait_handler;
 pub(crate) mod wait_spec;
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -49,6 +55,7 @@ use delegate::CodeModeDispatchBroker;
 use delegate::CodeModeDispatchWorker;
 pub(crate) use execute_handler::CodeModeExecuteHandler;
 use response_adapter::into_function_call_output_content_items;
+use wait_backoff::WaitBackoff;
 pub(crate) use wait_handler::CodeModeWaitHandler;
 
 pub(crate) const PUBLIC_TOOL_NAME: &str = codex_code_mode::PUBLIC_TOOL_NAME;
@@ -74,6 +81,7 @@ pub(crate) struct CodeModeService {
     default_exec_yield_time_ms: u64,
     shutdown_token: CancellationToken,
     unavailable_warning_emitted: AtomicBool,
+    wait_backoffs: Mutex<HashMap<CellId, WaitBackoff>>,
 }
 
 impl CodeModeService {
@@ -92,6 +100,7 @@ impl CodeModeService {
             default_exec_yield_time_ms: config.default_exec_yield_time_ms,
             shutdown_token: CancellationToken::new(),
             unavailable_warning_emitted: AtomicBool::new(false),
+            wait_backoffs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -126,21 +135,97 @@ impl CodeModeService {
         request
             .yield_time_ms
             .get_or_insert(self.default_exec_yield_time_ms);
-        self.session().await?.execute(request).await
+        let started_cell = self.session().await?.execute(request).await?;
+        self.wait_backoffs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                started_cell.cell_id.clone(),
+                WaitBackoff::new(std::time::Instant::now()),
+            );
+        Ok(started_cell)
     }
 
     pub(crate) async fn wait(
         &self,
         request: codex_code_mode::WaitRequest,
     ) -> Result<codex_code_mode::WaitOutcome, String> {
-        self.session().await?.wait(request).await
+        // Short waits are the common shape of model-generated polling loops.
+        // Keep empty observations inside the runtime until there is output or
+        // a terminal result, so the model does not pay for a turn per poll.
+        // A longer explicit wait remains an interactive checkpoint.
+        let wait_for_progress = request.yield_time_ms <= DEFAULT_WAIT_YIELD_TIME_MS;
+        let session = self.session().await?;
+        let cell_id = request.cell_id.clone();
+
+        loop {
+            let next_yield_time_ms = {
+                let mut wait_backoffs = self
+                    .wait_backoffs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let wait_backoff = wait_backoffs
+                    .entry(cell_id.clone())
+                    .or_insert_with(|| WaitBackoff::new(std::time::Instant::now()));
+                wait_backoff.next_yield_time_ms(request.yield_time_ms)
+            };
+            let Some(yield_time_ms) = next_yield_time_ms else {
+                let outcome = session.terminate(cell_id.clone()).await;
+                self.wait_backoffs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&cell_id);
+                return outcome;
+            };
+
+            let outcome = session
+                .wait(codex_code_mode::WaitRequest {
+                    cell_id: cell_id.clone(),
+                    yield_time_ms,
+                })
+                .await?;
+            let continue_waiting = matches!(
+                &outcome,
+                codex_code_mode::WaitOutcome::LiveCell(
+                    codex_code_mode::RuntimeResponse::Yielded {
+                        content_items, ..
+                    }
+                ) if content_items.is_empty() && wait_for_progress
+            );
+            let terminal = !matches!(
+                &outcome,
+                codex_code_mode::WaitOutcome::LiveCell(
+                    codex_code_mode::RuntimeResponse::Yielded { .. }
+                )
+            );
+
+            let mut wait_backoffs = self
+                .wait_backoffs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if terminal {
+                wait_backoffs.remove(&cell_id);
+            } else if let Some(wait_backoff) = wait_backoffs.get_mut(&cell_id) {
+                wait_backoff.record_yield(yield_time_ms);
+            }
+            drop(wait_backoffs);
+
+            if !continue_waiting {
+                return Ok(outcome);
+            }
+        }
     }
 
     pub(crate) async fn terminate(
         &self,
         cell_id: CellId,
     ) -> Result<codex_code_mode::WaitOutcome, String> {
-        self.session().await?.terminate(cell_id).await
+        let outcome = self.session().await?.terminate(cell_id.clone()).await;
+        self.wait_backoffs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&cell_id);
+        outcome
     }
 
     pub(crate) async fn interrupt_active_cells(&self) {
@@ -195,6 +280,10 @@ impl CodeModeService {
 
     pub(crate) fn finish_cell_dispatch(&self, cell_id: &CellId) {
         self.dispatch_broker.close_cell(cell_id);
+        self.wait_backoffs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(cell_id);
     }
 
     pub(crate) fn start_turn_worker(

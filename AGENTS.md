@@ -5,7 +5,9 @@
 - Keep `just build-army` as the fast local iteration build: use Cargo's default
   unoptimized development profile for both Army binaries.
 - Keep `just test` on Cargo's default fast development profile as well. Local
-  build and test loops must not use the expensive release profile.
+  build and test loops must not use the expensive release profile. The default
+  test recipe temporarily excludes Code Mode tests; run `just test-code-mode`
+  explicitly when validating that suite.
 - Keep `just build-army-optimized` and GitHub Actions' release job on the
   `release-army` profile with the full optimization/LTO settings. CI and
   release artifacts must never silently switch to the fast local profile.

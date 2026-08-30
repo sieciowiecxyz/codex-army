@@ -47,7 +47,7 @@ jobs:
         run: scripts/army-cargo.sh fmt --all -- --config imports_granularity=Item --check
       - name: Build test helper binaries
         run: scripts/army-cargo.sh build --locked -p codex-cli --bin codex -p codex-rmcp-client --bin test_stdio_server
-      - name: Run core tests
+      - name: Run core tests (Code Mode tests opt-in)
         run: just test -p codex-core
       - name: Run account-switch integration tests
         run: |

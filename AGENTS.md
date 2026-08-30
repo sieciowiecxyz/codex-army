@@ -4,9 +4,27 @@
 
 - Keep `just build-army` as the fast local iteration build: use Cargo's default
   unoptimized development profile for both Army binaries.
-- Keep `just build-army-optimized` and GitHub Actions on the `release-army`
-  profile with the full optimization/LTO settings. CI and release artifacts
-  must never silently switch to the fast local profile.
+- Keep `just test` on Cargo's default fast development profile as well. Local
+  build and test loops must not use the expensive release profile.
+- Keep `just build-army-optimized` and GitHub Actions' release job on the
+  `release-army` profile with the full optimization/LTO settings. CI and
+  release artifacts must never silently switch to the fast local profile.
+- Push the final source commit to `main`; for a distributable release, create
+  an `army-v*` tag so GitHub Actions performs the long optimized build and
+  creates the packages and release artifacts.
+
+## Codex Army repository layout and purpose
+
+- Codex Army is a small maintained fork of upstream Codex. The upstream Rust
+  workspace lives in `codex-source/codex-rs`; Army-owned patches, scripts,
+  packaging, and CI live at the repository root. Keep this boundary stable so
+  upstream updates remain easy to integrate.
+- The fork keeps account-switch failover through the companion
+  `codex-accounts` command and ships both `codex` and the adjacent
+  `codex-code-mode-host`. Auto-prompt is intentionally not part of the fork.
+- Changes to upstream behavior should be minimal and isolated from the root
+  build/release plumbing. Prefer updating the root wrappers and CI when the
+  goal is Army-specific packaging or build behavior.
 
 In the codex-source/codex-rs folder where the Rust code lives:
 

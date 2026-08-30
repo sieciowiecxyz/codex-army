@@ -1,7 +1,11 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::Prompt;
 use crate::ResponseStream;
+use crate::account_switch::AccountSwitchBackoff;
+use crate::account_switch::AccountSwitchResult;
+use crate::account_switch::should_attempt_rate_limit_account_switch;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
 use crate::compact::CompactedHistoryMetadata;
@@ -51,6 +55,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TruncationPolicy;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::protocol::WarningEvent;
 use codex_rollout_trace::CompactionCheckpointTracePayload;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_utils_output_truncation::approx_token_count;
@@ -242,15 +247,66 @@ async fn run_remote_compact_task_inner_impl(
     sess.emit_turn_item_started(turn_context, &compaction_item)
         .await;
 
-    let attempt = run_remote_compact_v2_attempt(
-        sess,
-        step_context,
-        client_session.as_deref_mut(),
-        &compaction_trace,
-        compaction_metadata,
-        analytics_details,
-    )
-    .await;
+    let mut account_switch_backoff = AccountSwitchBackoff::default();
+    let mut switched_accounts = HashSet::new();
+    let attempt = loop {
+        let result = run_remote_compact_v2_attempt(
+            sess,
+            step_context,
+            client_session.as_deref_mut(),
+            &compaction_trace,
+            compaction_metadata,
+            analytics_details,
+        )
+        .await;
+        match result {
+            Err(error) if should_attempt_rate_limit_account_switch(&error) => {
+                match sess
+                    .services
+                    .model_client
+                    .switch_account_after_rate_limit()
+                    .await
+                {
+                    AccountSwitchResult::Switched { from, to }
+                        if switched_accounts.insert(to.clone()) =>
+                    {
+                        if let Some(client_session) = client_session.as_deref_mut() {
+                            client_session.reset_auth_dependent_session_state();
+                        }
+                        account_switch_backoff.reset();
+                        sess.send_event(
+                            turn_context,
+                            EventMsg::Warning(WarningEvent {
+                                message: format!(
+                                    "Changing account: {from} → {to}. Continuing previous task…"
+                                ),
+                            }),
+                        )
+                        .await;
+                        continue;
+                    }
+                    AccountSwitchResult::Unavailable { retry_after } => {
+                        let delay = account_switch_backoff.next_delay(retry_after);
+                        sess.send_event(
+                            turn_context,
+                            EventMsg::Warning(WarningEvent {
+                                message: format!(
+                                    "All accounts are currently rate-limited. Checking again in {delay:?}."
+                                ),
+                            }),
+                        )
+                        .await;
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    AccountSwitchResult::Switched { .. } | AccountSwitchResult::Failed => {
+                        break Err(error);
+                    }
+                }
+            }
+            result => break result,
+        }
+    };
     let (attempt, compaction_turn_context) = match attempt {
         Ok(attempt) => (attempt, turn_context),
         Err(error) => {

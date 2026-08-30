@@ -4,6 +4,9 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use crate::account_switch::AccountSwitchBackoff;
+use crate::account_switch::AccountSwitchResult;
+use crate::account_switch::should_attempt_rate_limit_account_switch;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
@@ -1384,6 +1387,8 @@ async fn run_sampling_request(
     );
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retry_state = ResponsesStreamRetryState::default();
+    let mut account_switch_backoff = AccountSwitchBackoff::default();
+    let mut switched_accounts = HashSet::new();
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
@@ -1433,7 +1438,7 @@ async fn run_sampling_request(
                     if let Some(rate_limits) = rate_limits {
                         sess.update_rate_limits(&turn_context, *rate_limits).await;
                     }
-                    return Err(err);
+                    err
                 }
                 _ => err,
             },
@@ -1441,6 +1446,53 @@ async fn run_sampling_request(
 
         if original_input.is_none() {
             original_input = Some(prompt.input);
+        }
+
+        if should_attempt_rate_limit_account_switch(&err) {
+            match sess
+                .services
+                .model_client
+                .switch_account_after_rate_limit()
+                .await
+            {
+                AccountSwitchResult::Switched { from, to }
+                    if switched_accounts.insert(to.clone()) =>
+                {
+                    client_session.reset_auth_dependent_session_state();
+                    account_switch_backoff.reset();
+                    retry_state = ResponsesStreamRetryState::default();
+                    sess.send_event(
+                        &turn_context,
+                        EventMsg::Warning(WarningEvent {
+                            message: format!(
+                                "Changing account: {from} → {to}. Continuing previous task…"
+                            ),
+                        }),
+                    )
+                    .await;
+                    continue;
+                }
+                AccountSwitchResult::Unavailable { retry_after } => {
+                    let delay = account_switch_backoff.next_delay(retry_after);
+                    sess.send_event(
+                        &turn_context,
+                        EventMsg::Warning(WarningEvent {
+                            message: format!(
+                                "All accounts are currently rate-limited. Checking again in {delay:?}."
+                            ),
+                        }),
+                    )
+                    .await;
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => {
+                            return Err(CodexErr::new(CodexErrorDetails::Interrupted));
+                        }
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                    continue;
+                }
+                AccountSwitchResult::Switched { .. } | AccountSwitchResult::Failed => {}
+            }
         }
 
         if !err.is_retryable() {

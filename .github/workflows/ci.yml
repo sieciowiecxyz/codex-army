@@ -1,0 +1,134 @@
+name: Codex Army CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['army-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install test runner
+        run: cargo install --locked cargo-nextest just
+      - name: Check formatting
+        run: python3 ../scripts/format.py --check
+      - name: Build test helper binaries
+        run: cargo build --locked -p codex-cli --bin codex -p codex-rmcp-client --bin test_stdio_server
+      - name: Run core tests
+        run: just test -p codex-core
+
+  build:
+    name: Build Linux release binary
+    if: startsWith(github.ref, 'refs/tags/army-v')
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - name: Build optimized binary
+        working-directory: codex-rs
+        run: cargo build --locked --profile release-army --target x86_64-unknown-linux-gnu -p codex-cli --bin codex
+      - name: Stage release files
+        run: |
+          mkdir -p dist
+          cp codex-rs/target/x86_64-unknown-linux-gnu/release-army/codex dist/codex
+          cp LICENSE dist/LICENSE
+          sha256sum dist/codex > dist/codex.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-linux-x86_64
+          path: dist
+
+  packages:
+    name: Build Linux packages
+    if: startsWith(github.ref, 'refs/tags/army-v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: codex-linux-x86_64
+          path: dist
+      - name: Install RPM tooling
+        run: sudo apt-get update && sudo apt-get install -y rpm
+      - name: Build RPM
+        run: |
+          version="${GITHUB_REF_NAME#army-v}"
+          spec_dir="${RUNNER_TEMP}/rpmbuild"
+          mkdir -p "$spec_dir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          cp dist/codex "$spec_dir/SOURCES/codex"
+          cp dist/LICENSE "$spec_dir/SOURCES/LICENSE"
+          sed "s/^Version:.*/Version:        ${version}/" \
+              packaging/fedora/codex-army.spec > "$spec_dir/SPECS/codex-army.spec"
+          rpmbuild -bb "$spec_dir/SPECS/codex-army.spec" \
+            --define "_topdir $spec_dir" --define "_rpmdir ${RUNNER_TEMP}/rpm-out"
+          mkdir -p dist/packages
+          find "${RUNNER_TEMP}/rpm-out" -name '*.rpm' -exec cp {} dist/packages/ \;
+      - name: Build Arch package
+        run: |
+          version="${GITHUB_REF_NAME#army-v}"
+          package_dir="${RUNNER_TEMP}/arch-package"
+          mkdir -p "$package_dir"
+          cp dist/codex dist/LICENSE packaging/arch/PKGBUILD "$package_dir/"
+          sed -i "s/^pkgver=.*/pkgver=${version}/" "$package_dir/PKGBUILD"
+          binary_sha256="$(sha256sum "$package_dir/codex" | cut -d' ' -f1)"
+          license_sha256="$(sha256sum "$package_dir/LICENSE" | cut -d' ' -f1)"
+          sed -i "s/^sha256sums=.*/sha256sums=('${binary_sha256}' '${license_sha256}')/" "$package_dir/PKGBUILD"
+          docker run --rm \
+            -v "$package_dir:/build" \
+            archlinux:base-devel \
+            bash -c 'pacman -Sy --noconfirm archlinux-keyring && cd /build && makepkg --nodeps --noconfirm'
+          cp "$package_dir"/*.pkg.tar.zst dist/packages/
+      - name: Add checksums
+        run: sha256sum dist/packages/* > dist/packages/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-linux-packages
+          path: dist/packages
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/army-v')
+    needs: packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: codex-linux-x86_64
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: codex-linux-packages
+          path: dist/packages
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/codex dist/codex.sha256 \
+            dist/packages/* --repo "$GITHUB_REPOSITORY" --generate-notes

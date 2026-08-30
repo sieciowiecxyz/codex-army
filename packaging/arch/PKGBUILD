@@ -1,0 +1,18 @@
+pkgname=codex-army
+pkgver=0.151.0
+pkgrel=1
+pkgdesc='Codex CLI fork with account-switch failover'
+arch=('x86_64')
+url='https://github.com/sieciowiecxyz/codex-army'
+license=('Apache-2.0')
+depends=('glibc')
+conflicts=('codex')
+source=('codex' 'LICENSE')
+# The release workflow replaces these values with the checksums of the staged
+# binary and license before running makepkg.
+sha256sums=('SKIP' 'SKIP')
+
+package() {
+  install -Dm755 "$srcdir/codex" "$pkgdir/usr/bin/codex"
+  install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

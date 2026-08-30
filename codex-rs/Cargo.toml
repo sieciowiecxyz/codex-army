@@ -576,6 +576,16 @@ strip = false
 # Balance parallel release code generation against binary size.
 codegen-units = 4
 
+# Distribution profile for the Army fork. Keep the upstream `release` profile
+# unchanged so upstream build and packaging assumptions remain intact.
+[profile.release-army]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+debug = 0
+strip = "symbols"
+incremental = false
+
 [profile.profiling]
 inherits = "release"
 debug = "full"

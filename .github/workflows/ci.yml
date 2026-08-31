@@ -49,18 +49,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
-      - name: Install LLVM linker
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang lld
       - name: Download Codex-built V8 prebuilt archive
         uses: ./codex-source/.github/actions/setup-rusty-v8
         with:
           target: x86_64-unknown-linux-gnu
       - name: Build optimized binaries
         env:
-          CARGO_BUILD_JOBS: 1
-          RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=lld"
+          CARGO_BUILD_JOBS: 2
         run: |
           set -euo pipefail
           scripts/army-cargo.sh build --locked --profile release-army --target x86_64-unknown-linux-gnu -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host &

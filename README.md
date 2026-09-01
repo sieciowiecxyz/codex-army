@@ -22,8 +22,9 @@ just build-army-optimized    # optimized release-army build
 just install-army             # install optimized Army binaries
 ```
 
-The optimized `release-army` profile uses fat LTO, one codegen unit, symbol
-stripping, and disabled incremental compilation. The release workflow runs on
+The optimized `release-army` profile uses thin LTO, four codegen units, symbol
+stripping, and disabled incremental compilation. This balances compile time
+with optimized runtime performance. The release workflow runs on
 tags named `army-v*`, builds both `codex` and `codex-code-mode-host`, creates
 Fedora and Arch packages, and publishes all artifacts to the GitHub Release.
 

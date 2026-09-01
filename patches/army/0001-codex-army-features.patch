@@ -1353,10 +1353,10 @@ diff --git a/cli/src/main.rs b/cli/src/main.rs
 +use std::process::Stdio;
  use std::sync::Arc;
  use supports_color::Stream;
-@@ -1043,3 +1044,36 @@ fn main() -> anyhow::Result<()> {
+@@ -1043,4 +1044,36 @@ fn main() -> anyhow::Result<()> {
      })
  }
-+
+ 
 +fn select_best_account_on_startup() {
 +    let result = std::process::Command::new("codex-accounts")
 +        .arg("use-best")

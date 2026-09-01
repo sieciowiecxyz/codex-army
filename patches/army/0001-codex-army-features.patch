@@ -1353,7 +1353,7 @@ diff --git a/cli/src/main.rs b/cli/src/main.rs
 +use std::process::Stdio;
  use std::sync::Arc;
  use supports_color::Stream;
-@@ -1043,4 +1044,36 @@ fn main() -> anyhow::Result<()> {
+@@ -1043,4 +1044,35 @@ fn main() -> anyhow::Result<()> {
      })
  }
  
@@ -1375,8 +1375,7 @@ diff --git a/cli/src/main.rs b/cli/src/main.rs
 +fn should_select_best_account(subcommand: Option<&Subcommand>) -> bool {
 +    matches!(
 +        subcommand,
-+        None
-+            | Some(Subcommand::Agents(_))
++        None | Some(Subcommand::Agents(_))
 +            | Some(Subcommand::Exec(_))
 +            | Some(Subcommand::Review(_))
 +            | Some(Subcommand::McpServer(_))

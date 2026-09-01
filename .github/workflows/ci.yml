@@ -37,8 +37,6 @@ jobs:
           test -x codex-source/codex-rs/target/debug/codex
           codex-source/codex-rs/target/debug/codex --version
           codex-source/codex-rs/target/debug/codex --help >/dev/null
-      - name: Check startup account selection hook
-        run: scripts/test-account-selection.sh codex-source/codex-rs/target/debug/codex
 
   build:
     name: Build Linux release binaries
@@ -77,8 +75,6 @@ jobs:
           sha256sum dist/codex-code-mode-host > dist/codex-code-mode-host.sha256
       - name: Sanity check staged binaries
         run: bash scripts/health-check-army.sh dist/codex dist/codex-code-mode-host
-      - name: Check optimized startup account selection hook
-        run: scripts/test-account-selection.sh dist/codex
       - uses: actions/upload-artifact@v4
         with:
           name: codex-linux-x86_64

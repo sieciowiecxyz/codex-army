@@ -36,16 +36,16 @@ install:
     rustup show active-toolchain
     {{ army_cargo }} fetch --locked
 
-# Fast local iteration build. GitHub Actions uses release-army explicitly below.
+# Fast local iteration build. GitHub Actions uses the standard release profile below.
 build-army:
     RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` {{ army_cargo }} build --locked -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host
 
 build-army-optimized:
-    RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` {{ army_cargo }} build --locked --profile release-army -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host
+    RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` {{ army_cargo }} build --locked --release -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host
 
 install-army:
-    RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` {{ army_cargo }} install --path cli --locked --force --profile release-army --bin codex
-    RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` {{ army_cargo }} install --path code-mode-host --locked --force --profile release-army --bin codex-code-mode-host
+    RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` {{ army_cargo }} install --path cli --locked --force --release --bin codex
+    RUSTY_V8_ARCHIVE=`{{ rusty_v8_script }} --archive` RUSTY_V8_SRC_BINDING_PATH=`{{ rusty_v8_script }} --binding` {{ army_cargo }} install --path code-mode-host --locked --force --release --bin codex-code-mode-host
 
 build-army-debug: build-army
 

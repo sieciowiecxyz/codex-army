@@ -50,15 +50,13 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu
       - name: Download Codex-built V8 prebuilt archive
-        uses: ./codex-source/.github/actions/setup-rusty-v8
-        with:
-          target: x86_64-unknown-linux-gnu
+        run: scripts/setup-rusty-v8.sh >> "$GITHUB_ENV"
       - name: Build optimized binaries
         env:
           CARGO_BUILD_JOBS: 2
         run: |
           set -euo pipefail
-          scripts/army-cargo.sh build --locked --profile release-army --target x86_64-unknown-linux-gnu -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host &
+          scripts/army-cargo.sh build --locked --release --target x86_64-unknown-linux-gnu -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host &
           build_pid=$!
           while ps -p "$build_pid" >/dev/null; do
             echo "Optimized release build is still running (${SECONDS}s elapsed)..."
@@ -68,8 +66,8 @@ jobs:
       - name: Stage release files
         run: |
           mkdir -p dist
-          cp codex-source/codex-rs/target/x86_64-unknown-linux-gnu/release-army/codex dist/codex
-          cp codex-source/codex-rs/target/x86_64-unknown-linux-gnu/release-army/codex-code-mode-host dist/codex-code-mode-host
+          cp codex-source/codex-rs/target/x86_64-unknown-linux-gnu/release/codex dist/codex
+          cp codex-source/codex-rs/target/x86_64-unknown-linux-gnu/release/codex-code-mode-host dist/codex-code-mode-host
           cp LICENSE dist/LICENSE
           sha256sum dist/codex > dist/codex.sha256
           sha256sum dist/codex-code-mode-host > dist/codex-code-mode-host.sha256

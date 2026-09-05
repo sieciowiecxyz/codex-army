@@ -18,14 +18,12 @@ repository root.
 
 ```sh
 just build-army              # fast, unoptimized local build
-just build-army-optimized    # optimized release-army build
+just build-army-optimized    # optimized standard release build
 just install-army             # install optimized Army binaries
 ```
 
-The optimized `release-army` profile uses thin LTO, four codegen units, symbol
-stripping, and disabled incremental compilation. This balances compile time
-with optimized runtime performance. The release workflow runs on
-tags named `army-v*`, builds both `codex` and `codex-code-mode-host`, creates
+The release workflow currently uses Cargo's standard `--release` profile. It
+runs on tags named `army-v*`, builds both `codex` and `codex-code-mode-host`, creates
 Fedora and Arch packages, and publishes all artifacts to the GitHub Release.
 
 All root build and test commands apply `patches/army/` to a temporary copy of
@@ -35,11 +33,9 @@ Army patch, rather than editing `codex-source/` directly.
 
 ## Army patches
 
-The main patch adds account-switch failover and mock coverage, recovers
-incomplete tool-call history with an aborted output, and changes Code Mode
-waiting to a runtime-owned `30s → 1m → 2m → 4m → 8m → 10m` schedule. The
-model's `yield_time_ms` is ignored; output resets the schedule to 30 seconds,
-and buffered output has a hard limit.
+The main patch adds account-switch failover and mock coverage. History
+recovery and custom Code Mode wait scheduling are intentionally not included
+at this stage.
 
 Account failover uses the companion `codex-accounts` command. Auto-prompt
 functionality is intentionally not part of this fork. CI currently runs

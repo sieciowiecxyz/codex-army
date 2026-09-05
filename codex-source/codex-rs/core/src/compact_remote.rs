@@ -1,10 +1,6 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use crate::account_switch::AccountSwitchBackoff;
-use crate::account_switch::AccountSwitchResult;
-use crate::account_switch::should_attempt_rate_limit_account_switch;
 use crate::compact::CompactedHistoryMetadata;
 use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
@@ -42,7 +38,6 @@ use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TurnStartedEvent;
-use codex_protocol::protocol::WarningEvent;
 use codex_rollout_trace::CompactionCheckpointTracePayload;
 use codex_utils_output_truncation::approx_token_count;
 use tokio_util::sync::CancellationToken;
@@ -198,7 +193,7 @@ async fn run_remote_compact_task_inner_impl(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
-    mut turn_state: Option<Arc<OnceLock<String>>>,
+    turn_state: Option<Arc<OnceLock<String>>>,
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
@@ -217,64 +212,15 @@ async fn run_remote_compact_task_inner_impl(
     let compaction_item = TurnItem::ContextCompaction(context_compaction_item);
     sess.emit_turn_item_started(turn_context, &compaction_item)
         .await;
-    let mut account_switch_backoff = AccountSwitchBackoff::default();
-    let mut switched_accounts = HashSet::new();
-    let attempt = loop {
-        let result = run_remote_compact_attempt(
-            sess,
-            step_context,
-            turn_state.clone(),
-            &compaction_trace,
-            compaction_metadata,
-            analytics_details,
-        )
-        .await;
-        match result {
-            Err(error) if should_attempt_rate_limit_account_switch(&error) => {
-                match sess
-                    .services
-                    .model_client
-                    .switch_account_after_rate_limit()
-                    .await
-                {
-                    AccountSwitchResult::Switched { from, to }
-                        if switched_accounts.insert(to.clone()) =>
-                    {
-                        account_switch_backoff.reset();
-                        turn_state = Some(Arc::new(OnceLock::new()));
-                        sess.send_event(
-                            turn_context,
-                            EventMsg::Warning(WarningEvent {
-                                message: format!(
-                                    "Changing account: {from} → {to}. Continuing previous task…"
-                                ),
-                            }),
-                        )
-                        .await;
-                        continue;
-                    }
-                    AccountSwitchResult::Unavailable { retry_after } => {
-                        let delay = account_switch_backoff.next_delay(retry_after);
-                        sess.send_event(
-                            turn_context,
-                            EventMsg::Warning(WarningEvent {
-                                message: format!(
-                                    "All accounts are currently rate-limited. Checking again in {delay:?}."
-                                ),
-                            }),
-                        )
-                        .await;
-                        tokio::time::sleep(delay).await;
-                        continue;
-                    }
-                    AccountSwitchResult::Switched { .. } | AccountSwitchResult::Failed => {
-                        break Err(error);
-                    }
-                }
-            }
-            result => break result,
-        }
-    };
+    let attempt = run_remote_compact_attempt(
+        sess,
+        step_context,
+        turn_state.clone(),
+        &compaction_trace,
+        compaction_metadata,
+        analytics_details,
+    )
+    .await;
     let (attempt, compaction_turn_context) = match attempt {
         Ok(attempt) => (attempt, turn_context),
         Err(error) => {
@@ -284,6 +230,8 @@ async fn run_remote_compact_task_inner_impl(
             if !should_retry_with_current_model(&error) {
                 return Err(error);
             }
+            sess.set_last_known_step_context(fallback_step_context)
+                .await;
             let fallback_turn_context = &fallback_step_context.turn;
             let fallback_compaction_trace =
                 sess.services.rollout_thread_trace.compaction_trace_context(
@@ -352,6 +300,7 @@ async fn run_remote_compact_task_inner_impl(
             message: String::new(),
             window_number: new_window_number,
             window_ids: new_window_ids,
+            compaction_response_id: None,
         },
     )
     .await;

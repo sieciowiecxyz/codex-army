@@ -24,13 +24,13 @@
 //! fails, normal stream retry/fallback logic handles recovery on the same turn.
 
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+use async_channel::Sender;
 use codex_api::AgentIdentityTelemetry;
 use codex_api::ApiError;
 use codex_api::AuthProvider;
@@ -84,6 +84,9 @@ use codex_protocol::config_types::Verbosity as VerbosityConfig;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
+use codex_protocol::protocol::AuthRecoveryEvent;
+use codex_protocol::protocol::Event as ProtocolEvent;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
@@ -101,7 +104,6 @@ use http::HeaderValue;
 use http::StatusCode;
 use std::time::Duration;
 use std::time::Instant;
-use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
@@ -113,9 +115,6 @@ use tracing::trace;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::account_switch::AccountSwitchResult;
-use crate::account_switch::parse_account_switch_retry_after;
-use crate::account_switch::reports_no_available_account;
 use crate::attestation::AttestationContext;
 use crate::attestation::AttestationProvider;
 use crate::attestation::X_OAI_ATTESTATION_HEADER;
@@ -168,7 +167,6 @@ const WS_REQUEST_HEADER_RESPONSES_LITE_CLIENT_METADATA_KEY: &str =
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
 const X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER: &str =
     "x-openai-internal-codex-responses-lite";
-static ACCOUNT_SWITCH_COMMAND: OnceLock<StdMutex<Option<OsString>>> = OnceLock::new();
 const REALTIME_CALLS_ENDPOINT: &str = "/realtime/calls";
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
 // `/responses/compact` is unary, so the timeout covers the full response rather than one idle
@@ -297,6 +295,7 @@ pub struct ModelClient {
     agent_identity_policy: AgentIdentityAuthPolicy,
     prompt_cache_key_override: Option<String>,
     free_guardian_enabled: bool,
+    event_sender: Option<Sender<ProtocolEvent>>,
     http_client_factory: HttpClientFactory,
 }
 
@@ -518,6 +517,7 @@ impl ModelClient {
             agent_identity_policy,
             prompt_cache_key_override: None,
             free_guardian_enabled: false,
+            event_sender: None,
             http_client_factory,
         }
     }
@@ -527,11 +527,13 @@ impl ModelClient {
         self
     }
 
-    pub(crate) fn with_prompt_cache_key_override(
+    pub(crate) fn with_session_context(
         mut self,
         prompt_cache_key_override: Option<String>,
+        event_sender: Sender<ProtocolEvent>,
     ) -> Self {
         self.prompt_cache_key_override = prompt_cache_key_override;
+        self.event_sender = Some(event_sender);
         self
     }
 
@@ -563,71 +565,6 @@ impl ModelClient {
 
     pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.state.provider.auth_manager()
-    }
-
-    pub(crate) async fn switch_account_after_rate_limit(&self) -> AccountSwitchResult {
-        let Some(auth_manager) = self.auth_manager() else {
-            return AccountSwitchResult::Failed;
-        };
-        let Some(auth_before) = auth_manager.auth().await else {
-            return AccountSwitchResult::Failed;
-        };
-        let Some(account_before) = auth_before.get_account_id() else {
-            return AccountSwitchResult::Failed;
-        };
-
-        let output = match Command::new(account_switch_command())
-            .arg("use-best")
-            .output()
-            .await
-        {
-            Ok(output) => output,
-            Err(err) => {
-                warn!(error = %err, "failed to run account switch command");
-                return AccountSwitchResult::Failed;
-            }
-        };
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let command_output = format!("{stdout}\n{stderr}");
-        let retry_after = parse_account_switch_retry_after(&command_output);
-        if !output.status.success() && !reports_no_available_account(&command_output) {
-            warn!(
-                status = %output.status,
-                output = %stderr.trim(),
-                "account switch command failed"
-            );
-            return AccountSwitchResult::Failed;
-        }
-
-        if reports_no_available_account(&command_output) {
-            return AccountSwitchResult::Unavailable { retry_after };
-        }
-
-        auth_manager.reload().await;
-        let Some(auth_after) = auth_manager.auth().await else {
-            return AccountSwitchResult::Failed;
-        };
-        let Some(account_after) = auth_after.get_account_id() else {
-            return AccountSwitchResult::Failed;
-        };
-        if account_before == account_after {
-            return AccountSwitchResult::Unavailable { retry_after };
-        }
-
-        self.store_cached_websocket_session(WebsocketSession::default());
-        AccountSwitchResult::Switched {
-            from: account_before,
-            to: account_after,
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn set_account_switch_command_for_tests(command: Option<OsString>) {
-        let lock = ACCOUNT_SWITCH_COMMAND.get_or_init(|| StdMutex::new(None));
-        if let Ok(mut guard) = lock.lock() {
-            *guard = command;
-        }
     }
 
     fn take_cached_websocket_session(&self) -> WebsocketSession {
@@ -1333,13 +1270,6 @@ impl ModelClient {
     }
 }
 
-fn account_switch_command() -> OsString {
-    ACCOUNT_SWITCH_COMMAND
-        .get()
-        .and_then(|lock| lock.lock().ok().and_then(|guard| guard.clone()))
-        .unwrap_or_else(|| OsString::from("codex-accounts"))
-}
-
 impl Drop for ModelClientSession {
     fn drop(&mut self) {
         let websocket_session = std::mem::take(&mut self.websocket_session);
@@ -1351,11 +1281,6 @@ impl Drop for ModelClientSession {
 impl ModelClientSession {
     pub(crate) fn turn_state(&self) -> Arc<OnceLock<String>> {
         Arc::clone(&self.turn_state)
-    }
-
-    pub(crate) fn reset_auth_dependent_session_state(&mut self) {
-        self.reset_websocket_session();
-        self.turn_state = Arc::new(OnceLock::new());
     }
 
     fn reset_websocket_session(&mut self) {
@@ -1755,6 +1680,8 @@ impl ModelClientSession {
                             &mut provider_auth_recovery_attempted,
                             session_telemetry,
                             &self.client.state.provider,
+                            self.client.event_sender.as_ref(),
+                            responses_metadata.turn_id.as_deref(),
                         )
                         .await?,
                     );
@@ -1888,6 +1815,8 @@ impl ModelClientSession {
                             &mut provider_auth_recovery_attempted,
                             session_telemetry,
                             &provider,
+                            self.client.event_sender.as_ref(),
+                            responses_metadata.turn_id.as_deref(),
                         )
                         .await?,
                     );
@@ -2463,18 +2392,57 @@ struct WebsocketConnectParams<'a> {
     endpoint: ResponsesEndpoint,
 }
 
+fn emit_auth_recovery_event(
+    event_sender: Option<&Sender<ProtocolEvent>>,
+    turn_id: Option<&str>,
+    provider: &SharedModelProvider,
+    message: &str,
+    event: fn(AuthRecoveryEvent) -> EventMsg,
+) {
+    if let (Some(sender), Some(turn_id)) = (event_sender, turn_id) {
+        let _ = sender.try_send(ProtocolEvent {
+            id: turn_id.to_string(),
+            msg: event(AuthRecoveryEvent {
+                provider: provider.info().name.clone(),
+                message: message.to_string(),
+            }),
+        });
+    }
+}
+
 async fn handle_unauthorized(
     transport: TransportError,
     auth_recovery: &mut Option<UnauthorizedRecovery>,
     provider_auth_recovery_attempted: &mut bool,
     session_telemetry: &SessionTelemetry,
     provider: &SharedModelProvider,
+    event_sender: Option<&Sender<ProtocolEvent>>,
+    turn_id: Option<&str>,
 ) -> Result<UnauthorizedRecoveryExecution> {
     let debug = extract_response_debug_context(&transport);
     if !*provider_auth_recovery_attempted {
         *provider_auth_recovery_attempted = true;
+        let messages = provider.auth_recovery_messages();
+        if let Some(messages) = messages {
+            emit_auth_recovery_event(
+                event_sender,
+                turn_id,
+                provider,
+                messages.started,
+                EventMsg::AuthRecoveryStarted,
+            );
+        }
         match provider.recover_from_unauthorized().await {
             Ok(ProviderUnauthorizedRecovery::Recovered) => {
+                if let Some(messages) = messages {
+                    emit_auth_recovery_event(
+                        event_sender,
+                        turn_id,
+                        provider,
+                        messages.succeeded,
+                        EventMsg::AuthRecoveryCompleted,
+                    );
+                }
                 return Ok(UnauthorizedRecoveryExecution {
                     mode: "provider",
                     phase: "provider_refresh",

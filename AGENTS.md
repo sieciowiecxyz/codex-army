@@ -6,9 +6,9 @@
   unoptimized development profile for both Army binaries.
 - Keep `just test` on Cargo's default fast development profile as well. Local
   build and test loops must not use the expensive release profile.
-- Keep `just build-army-optimized` and GitHub Actions' release job on the
-  `release-army` profile with the full optimization/LTO settings. CI and
-  release artifacts must never silently switch to the fast local profile.
+- Keep `just build-army-optimized` and GitHub Actions' release job on Cargo's
+  standard `--release` profile for now. Do not add a custom profile or change
+  upstream `Cargo.toml` until a later optimization pass.
 - Push the final source commit to `main`; for a distributable release, create
   an `army-v*` tag so GitHub Actions performs the long optimized build and
   creates the packages and release artifacts.
